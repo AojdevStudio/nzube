@@ -22,6 +22,24 @@ Build, install, and exercise are separate states. An architectural test shell is
 
 Do not promote these rows based on a browser preview or another platform's successful build. Mobile architectural proof results belong in the feasibility record until the actual product is built and exercised.
 
+## Feasibility milestone
+
+The following results are separate from the unbuilt product above. The [compatibility record](../architecture/compatibility.md) gives provider and framework limits.
+
+| Target | Architectural proof | Limits |
+| --- | --- | --- |
+| Linux | Real direct ChatGPT consent, secure storage, completed generation with selected original guidance, persistence, byte-identical export, cancellation, interrupted stream, and invalid-bearer handling | CLI proof only. No installed product, dedicated GitHub onboarding, repository-grounded generation, live refresh, or billing-meter check |
+| macOS | No subscription CLI or product installation verified | An iOS simulator hosted on macOS does not establish a macOS product |
+| Windows | No build, installation, or runtime exercise | Unverified |
+| iOS | Private simulator proof app built and installed; reference persistence, Keychain sentinel, and delayed fixture callback recorded | Actual provider consent, token exchange, inference, user cancellation, signing, and physical-device flow remain unverified |
+| Android | Private emulator proof app built and installed; reference persistence, Keystore sentinel, and callback lifecycle recorded | Actual provider flow and physical-device operation remain unverified. A seven-minute fixture login stalled after process freeze |
+
+The Linux proof's source and public-safe receipt are proposed in [PR #2](https://github.com/AojdevStudio/nzube/pull/2). Mobile results are inherited private architectural evidence, not a reproducible public package. Do not distribute those scratch applications as Nzube releases.
+
+The read-only GitHub adapter is proposed in [PR #3](https://github.com/AojdevStudio/nzube/pull/3). Dedicated app registration and live selected-repository access remain outstanding. Synthetic tests do not establish the intended installation permissions, real expiration, revocation, or platform credential storage.
+
+Three interactive desktop and mobile design concepts were browser-checked and published for owner review. They use simulated generation, contain no third-party image assets, and do not select the final product UI. Screen-reader output and text scaling have not been verified.
+
 ## Installed release check
 
 Install outside the development checkout with isolated application data. Exercise provider connection, separate GitHub connection, guidance import and selection, intake persistence, generation, complete refinement, copy and export, restart and credential revocation. Compare clipboard and exported bytes with the full selected brief. Repeat relevant checks with cancelled generation, network interruption, expired credentials, inaccessible repository, unsupported image/provider and reference edits.
