@@ -37,6 +37,7 @@ const keyring = selectedStore();
 import { httpFailure, modelsFromResponse } from "./http";
 import { checkIdentityBinding, type Credential, PLAN_SCOPE, refreshSerialized, subjectBinding } from "./credentials";
 import { createSseParser } from "./sse";
+import { withFileLockSync } from "./lock";
 
 type Obj = { [k: string]: JsonValue };
 
@@ -72,11 +73,14 @@ async function pkceChallenge(verifier: string): Promise<string> {
   return b64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
 }
 
+/** Appends one record to a section of evidence.json. Overlapping runs serialize on the evidence lock. */
 function record(section: string, value: JsonValue) {
-  const current = existsSync(evidenceFile) ? (JSON.parse(readFileSync(evidenceFile, "utf8")) as Obj) : {};
-  const prior = current[section];
-  current[section] = [...(Array.isArray(prior) ? prior : []), value];
-  writeAtomic(evidenceFile, `${JSON.stringify(current, null, 2)}\n`);
+  withFileLockSync(`${evidenceFile}.lock`, () => {
+    const current = existsSync(evidenceFile) ? (JSON.parse(readFileSync(evidenceFile, "utf8")) as Obj) : {};
+    const prior = current[section];
+    current[section] = [...(Array.isArray(prior) ? prior : []), value];
+    writeAtomic(evidenceFile, `${JSON.stringify(current, null, 2)}\n`);
+  });
 }
 
 /** Stable opaque host id (urn:uuid v4), created once before the first sign-in. */

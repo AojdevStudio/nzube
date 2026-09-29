@@ -56,15 +56,19 @@ bun src/cli.ts infer req-1 --invalid-auth                 # real 401: failure, n
 - **Exit codes:** every command exits nonzero on failure.
   - `signin` exits 0 only when the grant includes ChatGPT plan use, and it exits as soon as the callback is handled.
   - Pressing Ctrl-C during `infer` exits 130 and keeps the partial.
-- **Concurrency:** overlapping runs are safe.
-  - Store updates and attempt ids go through a cross-process lock file (`<data>/store/.lock`).
+- **Concurrency:** overlapping runs coordinate through lock files.
+  - Store updates and attempt ids go through `<data>/store/.lock`.
+  - Evidence appends go through `<data>/evidence.json.lock`.
   - Token refresh is serialized per session (`<data>/state/refresh.lock`), and the stored credential is re-read under the lock, as OpenAI requires for rotating refresh tokens.
+  - A lock whose owner process no longer exists is taken over.
+  - Tests check 8 overlapping failed runs and 40 overlapping successful runs, including one evidence entry per generated attempt.
+  - Takeover of a crashed owner's lock is not covered by an atomic compare-and-remove. Two waiters could in principle both clear the same stale lock. A 960-process probe did not observe it.
 - **Streams:** they are parsed per the SSE format, so LF, CRLF, or CR line endings split anywhere across chunks all work.
 
 ## Tests
 
 ```sh
-bun run check    # bun test (39 checks) and tsc --noEmit
+bun run check    # bun test (40 checks) and tsc --noEmit
 ```
 
 The tests use no real network, credentials, or OS keyring.
@@ -73,7 +77,7 @@ The tests use no real network, credentials, or OS keyring.
 
 - sign-in callbacks that succeed, arrive with the wrong state, report denied consent, or lack the plan scope, each with its exit status and a prompt exit
 - streamed generations with LF, CRLF, and CR framing, plus failed and cut streams
-- eight overlapping runs that keep every attempt with a unique id
+- 8 overlapping failed runs that keep every attempt with a unique id, and 40 overlapping successful runs that keep one evidence entry per generated attempt
 
 **Direct unit tests** cover:
 

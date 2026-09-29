@@ -54,7 +54,6 @@ export const dataRoot =
 export const storeDir = join(dataRoot, "store");
 export const storeFile = join(storeDir, "store.json");
 export const blobDir = join(storeDir, "sources");
-export const evidenceFile = join(dataRoot, "evidence.json");
 export const outputsDir = join(dataRoot, "outputs");
 
 /** Serializes store read-modify-write cycles across processes. */
@@ -147,14 +146,6 @@ export function readSource(src: Source): string {
   return text;
 }
 
-/** Merges one section into evidence.json, keeping sections written by earlier runs. */
-export function recordEvidence(section: string, value: JsonValue) {
-  const current = existsSync(evidenceFile) ? (JSON.parse(readFileSync(evidenceFile, "utf8")) as Obj) : {};
-  const prior = current[section];
-  const runs = Array.isArray(prior) ? prior : prior === undefined ? [] : [prior];
-  current[section] = [...runs, value];
-  writeAtomic(evidenceFile, `${JSON.stringify(current, null, 2)}\n`);
-}
 
 export function findRequest(store: Store, id: string): RequestRecord {
   const req = store.requests.find((r) => r.id === id);

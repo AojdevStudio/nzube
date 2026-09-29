@@ -164,6 +164,22 @@ describe("concurrent runs", () => {
     expect(attempts.every((a) => a.outcome === "failed")).toBe(true);
   });
 
+  test("overlapping successful runs keep one evidence entry per generated attempt", async () => {
+    mock.state.framing = "lf";
+    mock.state.mode = "complete";
+    const data = seededData();
+    const runs = Array.from({ length: 40 }, () =>
+      Bun.spawn(["bun", "src/cli.ts", "infer", "req-1", "--invalid-auth"], { cwd: root, env: env(data), stdout: "ignore", stderr: "ignore" }),
+    );
+    expect(await Promise.all(runs.map((r) => r.exited))).toEqual(Array(40).fill(0));
+    const store = JSON.parse(readFileSync(join(data, "store", "store.json"), "utf8"));
+    const generated = (store.requests[0].attempts as Array<{ id: string; outcome: string }>).filter((a) => a.outcome === "generated").map((a) => a.id);
+    const evidence = JSON.parse(readFileSync(join(data, "evidence.json"), "utf8"));
+    const recorded = (evidence.infer as Array<{ attemptId: string; outcome: string }>).filter((r) => r.outcome === "generated").map((r) => r.attemptId);
+    expect(generated.length).toBe(40);
+    expect([...recorded].sort()).toEqual([...generated].sort());
+  });
+
   test("concurrent refreshes of one session exchange the refresh token once", async () => {
     const store = memoryStore();
     const lockDir = mkdtempSync(join(tmpdir(), "nzube-lock-"));
