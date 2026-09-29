@@ -90,19 +90,18 @@ async fn run() -> Result<Value, String> {
     if let Some(n) = rest.get(1) {
         let number = text(PullNumber::parse(n))?;
         let pull = fetch(&repo, &credential, EvidenceRequest::PullRequest { number }).await?;
-        // Files and diff are bound to the base and head this read observed.
+        // Files and diff come from compare pinned to the base and head this read observed.
         let revisions = match &pull.result {
             Ok(Evidence::PullRequest(doc)) => Some(doc.revisions.clone()),
             _ => None,
         };
         results.push(report(&pull));
         if let Some(revisions) = revisions {
-            let files = EvidenceRequest::PullRequestFiles {
-                number,
+            let files = EvidenceRequest::CompareFiles {
                 revisions: revisions.clone(),
             };
             results.push(report(&fetch(&repo, &credential, files).await?));
-            let diff = EvidenceRequest::PullRequestDiff { number, revisions };
+            let diff = EvidenceRequest::CompareDiff { revisions };
             results.push(report(&fetch(&repo, &credential, diff).await?));
         }
     }

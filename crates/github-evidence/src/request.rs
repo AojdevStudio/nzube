@@ -231,15 +231,24 @@ pub enum EvidenceRequest {
     PullRequest {
         number: PullNumber,
     },
-    /// `revisions` come from an earlier `PullRequest` read. The pull request is re-read
-    /// afterwards, and a different base or head makes the result `Partial(RevisionsChanged)`.
+    /// Files of pull request `number` as GitHub reports them now. The endpoint is
+    /// mutable, so the evidence carries no revision label and is never `Complete`:
+    /// full coverage is reported as `Partial(MutableSourceUnpinned)`.
     PullRequestFiles {
         number: PullNumber,
-        revisions: PullRevisions,
     },
-    /// Bound to `revisions` the same way as `PullRequestFiles`.
+    /// The pull request's diff as GitHub renders it now. Mutable, like `PullRequestFiles`.
     PullRequestDiff {
         number: PullNumber,
+    },
+    /// Files changed between two fixed commits, read from the compare endpoint pinned to
+    /// both SHAs, so the content is determined by `revisions`. This is a comparison of
+    /// that commit pair; it is not presented as GitHub's pull request view.
+    CompareFiles {
+        revisions: PullRevisions,
+    },
+    /// The diff text between the same two fixed commits.
+    CompareDiff {
         revisions: PullRevisions,
     },
     History {
@@ -272,6 +281,11 @@ pub enum Endpoint<'a> {
     PullFiles { number: PullNumber, per_page: u8 },
     /// GET /repos/{owner}/{repo}/pulls/{pull_number} with the diff media type
     PullDiff { number: PullNumber },
+    /// GET /repos/{owner}/{repo}/compare/{base}...{head}?per_page=1. `per_page=1` keeps
+    /// the commit list to one entry; GitHub lists changed files on the first page only.
+    Compare { revisions: &'a PullRevisions },
+    /// GET /repos/{owner}/{repo}/compare/{base}...{head} with the diff media type
+    CompareDiff { revisions: &'a PullRevisions },
 }
 
 pub const ACCEPT_JSON: &str = "application/vnd.github+json";
@@ -304,6 +318,11 @@ impl Endpoint<'_> {
                 Endpoint::PullFiles { number, .. } => {
                     segments.extend(["pulls", &number.get().to_string(), "files"]);
                 }
+                Endpoint::Compare { revisions } | Endpoint::CompareDiff { revisions } => {
+                    let basehead =
+                        format!("{}...{}", revisions.base.as_str(), revisions.head.as_str());
+                    segments.extend(["compare", basehead.as_str()]);
+                }
             }
         }
         {
@@ -326,7 +345,13 @@ impl Endpoint<'_> {
                 Endpoint::IssueComments { per_page, .. } | Endpoint::PullFiles { per_page, .. } => {
                     query.append_pair("per_page", &per_page.to_string());
                 }
-                Endpoint::Issue { .. } | Endpoint::Pull { .. } | Endpoint::PullDiff { .. } => {}
+                Endpoint::Compare { .. } => {
+                    query.append_pair("per_page", "1");
+                }
+                Endpoint::Issue { .. }
+                | Endpoint::Pull { .. }
+                | Endpoint::PullDiff { .. }
+                | Endpoint::CompareDiff { .. } => {}
             }
         }
         if url.query() == Some("") {
@@ -337,7 +362,7 @@ impl Endpoint<'_> {
 
     pub fn accept(&self) -> &'static str {
         match self {
-            Endpoint::PullDiff { .. } => ACCEPT_DIFF,
+            Endpoint::PullDiff { .. } | Endpoint::CompareDiff { .. } => ACCEPT_DIFF,
             _ => ACCEPT_JSON,
         }
     }

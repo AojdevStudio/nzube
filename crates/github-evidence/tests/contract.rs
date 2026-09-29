@@ -169,6 +169,16 @@ fn endpoint_allowlist_is_exact() {
             format!("{base}/pulls/9"),
             ACCEPT_DIFF,
         ),
+        (
+            Endpoint::Compare { revisions: &revs() },
+            format!("{base}/compare/{BASE_SHA}...{SHA}?per_page=1"),
+            ACCEPT_JSON,
+        ),
+        (
+            Endpoint::CompareDiff { revisions: &revs() },
+            format!("{base}/compare/{BASE_SHA}...{SHA}"),
+            ACCEPT_DIFF,
+        ),
     ];
     for (endpoint, url, accept) in cases {
         assert_eq!(endpoint.url(&repo()).as_str(), url, "{endpoint:?}");
@@ -257,8 +267,10 @@ async fn every_evidence_request_is_a_versioned_get_on_the_allowlist() {
         (EvidenceRequest::Issue { number: IssueNumber::parse("1").unwrap() }, r#"{"number":1,"title":"t","state":"open","body":null,"comments":0,"updated_at":"u"}"#.to_owned()),
         (EvidenceRequest::IssueComments { number: IssueNumber::parse("1").unwrap() }, "[]".to_owned()),
         (EvidenceRequest::PullRequest { number: PullNumber::parse("2").unwrap() }, r#"{"number":2,"title":"t","state":"closed","merged":true,"base":{"sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd"},"head":{"sha":"0123456789abcdef0123456789abcdef01234567"},"changed_files":1,"body":null,"updated_at":"u"}"#.to_owned()),
-        (EvidenceRequest::PullRequestFiles { number: PullNumber::parse("2").unwrap(), revisions: revs() }, "[]".to_owned()),
-        (EvidenceRequest::PullRequestDiff { number: PullNumber::parse("2").unwrap(), revisions: revs() }, "diff --git a/x b/x\n".to_owned()),
+        (EvidenceRequest::CompareFiles { revisions: revs() }, compare_json(&[])),
+        (EvidenceRequest::CompareDiff { revisions: revs() }, "diff --git a/x b/x\n".to_owned()),
+        (EvidenceRequest::PullRequestFiles { number: PullNumber::parse("2").unwrap() }, "[]".to_owned()),
+        (EvidenceRequest::PullRequestDiff { number: PullNumber::parse("2").unwrap() }, "diff --git a/x b/x\n".to_owned()),
         (EvidenceRequest::History { from: sha(), path: Some(path) }, "[]".to_owned()),
     ];
     let allowed = |p: &str| {
@@ -270,6 +282,7 @@ async fn every_evidence_request_is_a_versioned_get_on_the_allowlist() {
         match parts.as_slice() {
             ["commits"] => true,
             ["contents", ..] => parts.len() > 1,
+            ["compare", range] => range.contains("..."),
             ["issues", n] | ["issues", n, "comments"] | ["pulls", n] | ["pulls", n, "files"] => {
                 numeric(n)
             }
@@ -639,12 +652,9 @@ async fn byte_caps_mark_diff_partial_and_refuse_truncated_json() {
         reply(200, &[], &pull_json(SHA, 1)),
     ]);
     let fetched = client(&fixture, limits)
-        .fetch(&EvidenceRequest::PullRequestDiff {
-            number: PullNumber::parse("2").unwrap(),
-            revisions: revs(),
-        })
+        .fetch(&EvidenceRequest::CompareDiff { revisions: revs() })
         .await;
-    let Ok(Evidence::PullRequestDiff {
+    let Ok(Evidence::CompareDiff {
         text, completeness, ..
     }) = fetched.result
     else {
@@ -946,118 +956,70 @@ fn files_page(names: &[&str]) -> String {
 }
 
 #[tokio::test]
-async fn pull_files_and_diff_are_bound_to_the_expected_head() {
-    let pull = PullNumber::parse("9").unwrap();
-    let files = EvidenceRequest::PullRequestFiles {
-        number: pull,
-        revisions: revs(),
-    };
-    let diff = EvidenceRequest::PullRequestDiff {
-        number: pull,
-        revisions: revs(),
-    };
-
-    let fixture = Fixture::with([
-        reply(200, &[], &files_page(&["a", "b"])),
-        reply(200, &[], &pull_json(SHA, 2)),
-    ]);
-    let fetched = client(&fixture, Limits::default()).fetch(&files).await;
-    let Ok(Evidence::PullRequestFiles { files: paged, .. }) = fetched.result else {
+async fn pull_files_and_diff_are_read_from_compare_pinned_to_their_revisions() {
+    let pinned = format!("/repos/fixture-org/fixture-repo/compare/{BASE_SHA}...{SHA}");
+    let fixture = Fixture::with([reply(200, &[], &compare_json(&["a", "b"]))]);
+    let fetched = client(&fixture, Limits::default())
+        .fetch(&EvidenceRequest::CompareFiles { revisions: revs() })
+        .await;
+    let Ok(Evidence::CompareFiles { revisions, files }) = fetched.result else {
         panic!("{:?}", fetched.result)
     };
-    assert_eq!(paged.completeness, Completeness::Complete);
-    let paths: Vec<String> = fixture
-        .seen()
-        .iter()
-        .map(|r| r.url.path().to_owned())
-        .collect();
+    assert_eq!(revisions, revs());
+    assert_eq!(files.completeness, Completeness::Complete);
     assert_eq!(
-        paths,
-        [
-            "/repos/fixture-org/fixture-repo/pulls/9/files",
-            "/repos/fixture-org/fixture-repo/pulls/9"
-        ]
+        files
+            .items
+            .iter()
+            .map(|f| f.filename.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
     );
+    let seen = fixture.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].url.path(), pinned);
+    assert_eq!(seen[0].url.query(), Some("per_page=1"));
 
-    let moved = PartialReason::RevisionsChanged {
-        expected: revs(),
-        observed_base: BASE_SHA.to_owned(),
-        observed_head: OTHER_SHA.to_owned(),
-    };
-    let fixture = Fixture::with([
-        reply(200, &[], &files_page(&["a", "b"])),
-        reply(200, &[], &pull_json(OTHER_SHA, 2)),
-    ]);
-    let Ok(Evidence::PullRequestFiles { files: paged, .. }) = client(&fixture, Limits::default())
-        .fetch(&files)
-        .await
-        .result
-    else {
-        panic!()
-    };
-    assert_eq!(paged.completeness, Completeness::Partial(moved.clone()));
-
-    let fixture = Fixture::with([
-        reply(200, &[], "diff --git a/a b/a\n"),
-        reply(200, &[], &pull_json(OTHER_SHA, 1)),
-    ]);
-    let Ok(Evidence::PullRequestDiff { completeness, .. }) = client(&fixture, Limits::default())
-        .fetch(&diff)
-        .await
-        .result
-    else {
-        panic!()
-    };
-    assert_eq!(completeness, Completeness::Partial(moved));
-
-    let fixture = Fixture::with([
-        reply(200, &[], "diff --git a/a b/a\n"),
-        reply(429, &[("retry-after", "9")], "{}"),
-    ]);
-    let Ok(Evidence::PullRequestDiff { completeness, .. }) = client(&fixture, Limits::default())
-        .fetch(&diff)
-        .await
-        .result
-    else {
-        panic!()
-    };
-    assert_eq!(
+    let fixture = Fixture::with([reply(200, &[], "diff --git a/a b/a\n")]);
+    let fetched = client(&fixture, Limits::default())
+        .fetch(&EvidenceRequest::CompareDiff { revisions: revs() })
+        .await;
+    let Ok(Evidence::CompareDiff {
+        revisions,
         completeness,
-        Completeness::Partial(PartialReason::RevisionsUnverified(
-            FetchError::RateLimited {
-                kind: RateLimitKind::Secondary,
-                retry_after_secs: Some(9),
-                reset_epoch: None
-            }
-        ))
+        ..
+    }) = fetched.result
+    else {
+        panic!("{:?}", fetched.result)
+    };
+    assert_eq!((revisions, completeness), (revs(), Completeness::Complete));
+    let seen = fixture.seen();
+    assert_eq!(
+        (seen.len(), seen[0].url.path(), seen[0].header("accept")),
+        (1, pinned.as_str(), Some(ACCEPT_DIFF))
     );
 }
 
 #[tokio::test]
-async fn pull_files_disclose_github_listing_ceiling() {
-    let files = EvidenceRequest::PullRequestFiles {
-        number: PullNumber::parse("9").unwrap(),
-        revisions: revs(),
-    };
-    let fixture = Fixture::with([
-        reply(200, &[], &files_page(&["a", "b"])),
-        reply(200, &[], &pull_json(SHA, 3001)),
-    ]);
-    let Ok(Evidence::PullRequestFiles { files: paged, .. }) = client(&fixture, Limits::default())
-        .fetch(&files)
-        .await
-        .result
-    else {
-        panic!()
-    };
-    assert_eq!(paged.items.len(), 2);
-    assert_eq!(
-        paged.completeness,
-        Completeness::Partial(PartialReason::FilesBelowChangedCount {
-            listed: 2,
-            changed_files: 3001
-        })
-    );
+async fn compare_file_limit_is_reported_as_partial() {
+    for (count, expected) in [
+        (299, Completeness::Complete),
+        (
+            300,
+            Completeness::Partial(PartialReason::CompareFileLimit { listed: 300 }),
+        ),
+    ] {
+        let names: Vec<String> = (0..count).map(|i| format!("f{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let fixture = Fixture::with([reply(200, &[], &compare_json(&refs))]);
+        let fetched = client(&fixture, Limits::default())
+            .fetch(&EvidenceRequest::CompareFiles { revisions: revs() })
+            .await;
+        let Ok(Evidence::CompareFiles { files, .. }) = fetched.result else {
+            panic!()
+        };
+        assert_eq!((files.items.len(), files.completeness), (count, expected));
+    }
 }
 
 #[tokio::test]
@@ -1097,56 +1059,44 @@ async fn receipts_record_when_each_page_was_read() {
     );
 }
 
+fn compare_json(names: &[&str]) -> String {
+    format!(
+        r#"{{"status":"ahead","commits":[],"files":{}}}"#,
+        files_page(names)
+    )
+}
+
+#[allow(dead_code)]
 fn pull_json_with(base: &str, head: &str, changed_files: u64) -> String {
     pull_json(head, changed_files).replace(BASE_SHA, base)
 }
 
 #[tokio::test]
-async fn moving_base_with_stable_head_is_never_complete() {
-    let pull = PullNumber::parse("9").unwrap();
-    for request in [
-        EvidenceRequest::PullRequestFiles {
-            number: pull,
-            revisions: revs(),
-        },
-        EvidenceRequest::PullRequestDiff {
-            number: pull,
-            revisions: revs(),
-        },
-    ] {
-        let body = match request {
-            EvidenceRequest::PullRequestFiles { .. } => files_page(&["a"]),
-            _ => "diff --git a/a b/a\n".to_owned(),
-        };
-        // The caller read base BASE_SHA earlier; the base branch then moved to OTHER_SHA.
-        let fixture = Fixture::with([
-            reply(200, &[], &body),
-            reply(200, &[], &pull_json_with(OTHER_SHA, SHA, 1)),
-        ]);
-        let fetched = client(&fixture, Limits::default()).fetch(&request).await;
-        let completeness = match fetched.result {
-            Ok(Evidence::PullRequestFiles { files: paged, .. }) => paged.completeness,
-            Ok(Evidence::PullRequestDiff { completeness, .. }) => completeness,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(
-            completeness,
-            Completeness::Partial(PartialReason::RevisionsChanged {
-                expected: revs(),
-                observed_base: OTHER_SHA.to_owned(),
-                observed_head: SHA.to_owned(),
-            }),
-            "{request:?}"
-        );
-    }
+async fn requested_revisions_decide_the_compare_range() {
+    // A caller holding an older base asks for exactly that range; nothing re-reads the
+    // pull request, so the result describes the requested SHAs whatever the PR shows now.
+    let older = PullRevisions {
+        base: CommitSha::parse(OTHER_SHA).unwrap(),
+        head: sha(),
+    };
+    let fixture = Fixture::with([reply(200, &[], &compare_json(&["a"]))]);
+    let fetched = client(&fixture, Limits::default())
+        .fetch(&EvidenceRequest::CompareFiles {
+            revisions: older.clone(),
+        })
+        .await;
+    let Ok(Evidence::CompareFiles { revisions, .. }) = fetched.result else {
+        panic!()
+    };
+    assert_eq!(revisions, older);
+    assert_eq!(
+        fixture.seen()[0].url.path(),
+        format!("/repos/fixture-org/fixture-repo/compare/{OTHER_SHA}...{SHA}")
+    );
 }
 
 #[tokio::test]
-async fn inaccessible_revision_recheck_is_never_complete() {
-    let files = EvidenceRequest::PullRequestFiles {
-        number: PullNumber::parse("9").unwrap(),
-        revisions: revs(),
-    };
+async fn inaccessible_compare_is_an_error_never_complete() {
     for (status, expected) in [
         (404, FetchError::Unavailable),
         (401, FetchError::InvalidCredentials),
@@ -1157,23 +1107,18 @@ async fn inaccessible_revision_recheck_is_never_complete() {
             },
         ),
     ] {
-        let fixture = Fixture::with([
-            reply(200, &[], &files_page(&["a"])),
-            reply(status, &[], "{}"),
-        ]);
-        let Ok(Evidence::PullRequestFiles { files: paged, .. }) =
-            client(&fixture, Limits::default())
-                .fetch(&files)
-                .await
-                .result
-        else {
-            panic!()
-        };
-        assert_eq!(
-            paged.completeness,
-            Completeness::Partial(PartialReason::RevisionsUnverified(expected)),
-            "{status}"
-        );
+        for request in [
+            EvidenceRequest::CompareFiles { revisions: revs() },
+            EvidenceRequest::CompareDiff { revisions: revs() },
+        ] {
+            let fixture = Fixture::with([reply(status, &[], "{}")]);
+            let fetched = client(&fixture, Limits::default()).fetch(&request).await;
+            assert_eq!(
+                fetched.result.unwrap_err(),
+                expected,
+                "{status} {request:?}"
+            );
+        }
     }
 }
 
@@ -1277,5 +1222,69 @@ fn nzube_device_authorization(
         verification_uri: "https://github.com/login/device".to_owned(),
         expires_in: std::time::Duration::from_secs(expires_in),
         interval: std::time::Duration::from_secs(interval),
+    }
+}
+
+/// A base or head that moves A→B→A between reads must never yield content labeled with A
+/// unless the request that fetched it was pinned to A's SHAs.
+#[tokio::test]
+async fn aba_revision_change_never_stamps_content_from_another_revision() {
+    // Mutable source: content served while the head was at B. No re-read can make it
+    // revision-bound, so it carries no revision label and is never Complete.
+    let pull = PullNumber::parse("9").unwrap();
+    let fixture = Fixture::with([
+        reply(200, &[], &files_page(&["only-at-b.rs"])),
+        reply(200, &[], "diff --git a/only-at-b.rs b/only-at-b.rs\n"),
+    ]);
+    let mutable = client(&fixture, Limits::default());
+    let Ok(Evidence::PullRequestFiles(files)) = mutable
+        .fetch(&EvidenceRequest::PullRequestFiles { number: pull })
+        .await
+        .result
+    else {
+        panic!()
+    };
+    assert_eq!(
+        files.completeness,
+        Completeness::Partial(PartialReason::MutableSourceUnpinned)
+    );
+    let Ok(Evidence::PullRequestDiff { completeness, .. }) = mutable
+        .fetch(&EvidenceRequest::PullRequestDiff { number: pull })
+        .await
+        .result
+    else {
+        panic!()
+    };
+    assert_eq!(
+        completeness,
+        Completeness::Partial(PartialReason::MutableSourceUnpinned)
+    );
+
+    // Pinned source: the only way to get content labeled with A is a request for A.
+    let pinned = format!("/repos/fixture-org/fixture-repo/compare/{BASE_SHA}...{SHA}");
+    for request in [
+        EvidenceRequest::CompareFiles { revisions: revs() },
+        EvidenceRequest::CompareDiff { revisions: revs() },
+    ] {
+        let body = match request {
+            EvidenceRequest::CompareFiles { .. } => compare_json(&["at-a.rs"]),
+            _ => "diff --git a/at-a.rs b/at-a.rs\n".to_owned(),
+        };
+        let fixture = Fixture::with([reply(200, &[], &body)]);
+        let fetched = client(&fixture, Limits::default()).fetch(&request).await;
+        let stamped = match fetched.result {
+            Ok(
+                Evidence::CompareFiles { revisions, .. } | Evidence::CompareDiff { revisions, .. },
+            ) => revisions,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(stamped, revs());
+        assert!(
+            fetched
+                .receipts
+                .iter()
+                .all(|r| r.path_and_query.starts_with(&pinned)),
+            "{request:?}"
+        );
     }
 }

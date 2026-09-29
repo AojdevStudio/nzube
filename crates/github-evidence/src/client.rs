@@ -10,8 +10,8 @@ use url::Url;
 
 use crate::classify::{FetchError, classify};
 use crate::request::{
-    CommitSha, Endpoint, EvidenceRequest, GitRef, INSTRUCTION_CANDIDATES, PullNumber,
-    PullRevisions, RepoPath, RepoRef,
+    CommitSha, Endpoint, EvidenceRequest, GitRef, INSTRUCTION_CANDIDATES, PullRevisions, RepoPath,
+    RepoRef,
 };
 use crate::secret::SecretToken;
 use crate::transport::{API_VERSION, HttpRequest, HttpResponse, Method, Transport};
@@ -65,18 +65,13 @@ pub enum PartialReason {
         limit: usize,
     },
     StoppedBy(FetchError),
-    /// The pull request's base or head moved while its files or diff were read.
-    RevisionsChanged {
-        expected: PullRevisions,
-        observed_base: String,
-        observed_head: String,
-    },
-    /// The pull request could not be re-read, so the content is not tied to `expected`.
-    RevisionsUnverified(FetchError),
-    /// Fewer files listed than the pull request's `changed_files`. GitHub lists at most 3000.
-    FilesBelowChangedCount {
+    /// The content came from a mutable pull request endpoint, so it cannot be attributed
+    /// to a specific base and head. Used in place of `Complete` for those endpoints.
+    MutableSourceUnpinned,
+    /// The compare endpoint lists at most 300 changed files. A list that reaches the
+    /// limit may be cut short, and the response carries no total to check against.
+    CompareFileLimit {
         listed: u64,
-        changed_files: u64,
     },
 }
 
@@ -181,11 +176,20 @@ pub enum Evidence {
     /// and the SHA-256 of its body.
     IssueComments(Paged<CommentDoc>),
     PullRequest(PullDoc),
-    PullRequestFiles {
+    /// From the mutable pull request endpoint. No revision label; never `Complete`.
+    PullRequestFiles(Paged<PullFileDoc>),
+    /// From the mutable pull request endpoint. No revision label; never `Complete`.
+    PullRequestDiff {
+        text: String,
+        completeness: Completeness,
+    },
+    /// From compare pinned to `revisions`: the revisions the content actually came from.
+    CompareFiles {
         revisions: PullRevisions,
         files: Paged<PullFileDoc>,
     },
-    PullRequestDiff {
+    /// From compare pinned to `revisions`. Binary changes have no text patch in a diff.
+    CompareDiff {
         revisions: PullRevisions,
         text: String,
         completeness: Completeness,
@@ -213,6 +217,9 @@ pub struct Receipt {
     pub retrieved_at_unix_ms: u64,
     pub outcome: String,
 }
+
+/// The compare endpoint's documented ceiling on listed changed files.
+pub const COMPARE_FILE_LIMIT: u64 = 300;
 
 #[derive(Debug)]
 pub struct Fetched {
@@ -341,28 +348,52 @@ impl<T: Transport> EvidenceClient<T> {
                     .await?;
                 Ok(Evidence::PullRequest(pull.try_into()?))
             }
-            EvidenceRequest::PullRequestFiles { number, revisions } => {
+            EvidenceRequest::PullRequestFiles { number } => {
                 let endpoint = Endpoint::PullFiles {
                     number: *number,
                     per_page,
                 };
                 let mut paged: Paged<PullFileDoc> =
                     map_paged(self.get_paged::<wire::PullFile>(endpoint, session).await?);
-                let check = self.check_revisions(*number, revisions, session).await;
-                let listed = paged.items.len() as u64;
-                paged.completeness = bind_to_revisions(paged.completeness, check, Some(listed));
-                Ok(Evidence::PullRequestFiles {
-                    revisions: revisions.clone(),
-                    files: paged,
+                paged.completeness = unpinned(paged.completeness);
+                Ok(Evidence::PullRequestFiles(paged))
+            }
+            EvidenceRequest::PullRequestDiff { number } => {
+                let (text, completeness) = self
+                    .text(Endpoint::PullDiff { number: *number }, session)
+                    .await?;
+                Ok(Evidence::PullRequestDiff {
+                    text,
+                    completeness: unpinned(completeness),
                 })
             }
-            EvidenceRequest::PullRequestDiff { number, revisions } => {
-                let (text, completeness) = self.diff(*number, session).await?;
-                let check = self.check_revisions(*number, revisions, session).await;
-                Ok(Evidence::PullRequestDiff {
+            EvidenceRequest::CompareFiles { revisions } => {
+                let compare: wire::Compare = self
+                    .get_one(Endpoint::Compare { revisions }, session)
+                    .await?;
+                let listed = compare.files.len() as u64;
+                let completeness = if listed >= COMPARE_FILE_LIMIT {
+                    Completeness::Partial(PartialReason::CompareFileLimit { listed })
+                } else {
+                    Completeness::Complete
+                };
+                Ok(Evidence::CompareFiles {
+                    revisions: revisions.clone(),
+                    files: Paged {
+                        items: compare.files.into_iter().map(PullFileDoc::from).collect(),
+                        pages_fetched: 1,
+                        completeness,
+                    },
+                })
+            }
+            EvidenceRequest::CompareDiff { revisions } => {
+                let (text, completeness) = self
+                    .text(Endpoint::CompareDiff { revisions }, session)
+                    .await?;
+                Ok(Evidence::CompareDiff {
                     revisions: revisions.clone(),
                     text,
-                    completeness: bind_to_revisions(completeness, check, None),
+                    completeness,
                 })
             }
             EvidenceRequest::History { from, path } => {
@@ -420,12 +451,12 @@ impl<T: Transport> EvidenceClient<T> {
         })
     }
 
-    async fn diff(
+    /// Reads a diff body. A body cut by a byte cap is returned as partial text.
+    async fn text(
         &self,
-        number: PullNumber,
+        endpoint: Endpoint<'_>,
         session: &mut Session,
     ) -> Result<(String, Completeness), FetchError> {
-        let endpoint = Endpoint::PullDiff { number };
         let url = endpoint.url(&self.repo);
         let (response, completeness) = match self.send(&url, endpoint.accept(), session).await? {
             Body::Full(response) => (response, Completeness::Complete),
@@ -438,32 +469,6 @@ impl<T: Transport> EvidenceClient<T> {
             String::from_utf8_lossy(&response.body).into_owned(),
             completeness,
         ))
-    }
-
-    /// Re-reads the pull request after its files or diff. Matching base and head mean the
-    /// content was read between two observations of `expected`: the caller's and this one.
-    /// Returns the pull request's `changed_files`.
-    async fn check_revisions(
-        &self,
-        number: PullNumber,
-        expected: &PullRevisions,
-        session: &mut Session,
-    ) -> Result<u64, PartialReason> {
-        let pull: wire::Pull = self
-            .get_one(Endpoint::Pull { number }, session)
-            .await
-            .map_err(PartialReason::RevisionsUnverified)?;
-        let same = pull.base.sha.eq_ignore_ascii_case(expected.base.as_str())
-            && pull.head.sha.eq_ignore_ascii_case(expected.head.as_str());
-        if same {
-            Ok(pull.changed_files)
-        } else {
-            Err(PartialReason::RevisionsChanged {
-                expected: expected.clone(),
-                observed_base: pull.base.sha,
-                observed_head: pull.head.sha,
-            })
-        }
     }
 
     async fn get_one<W: DeserializeOwned>(
@@ -641,28 +646,12 @@ impl<T: Transport> EvidenceClient<T> {
     }
 }
 
-/// Combines what was read with the revision re-check. Moved revisions override everything,
-/// since the content may belong to other commits. Otherwise an existing partial reason is kept, and
-/// only content that is otherwise complete is downgraded by an unverified re-read or by a file
-/// list shorter than `changed_files` (`listed` is `Some` for file lists only).
-fn bind_to_revisions(
-    content: Completeness,
-    head_check: Result<u64, PartialReason>,
-    listed: Option<u64>,
-) -> Completeness {
-    match (head_check, content) {
-        (Err(moved @ PartialReason::RevisionsChanged { .. }), _) => Completeness::Partial(moved),
-        (_, partial @ Completeness::Partial(_)) => partial,
-        (Err(unverified), Completeness::Complete) => Completeness::Partial(unverified),
-        (Ok(changed_files), Completeness::Complete) => match listed {
-            Some(listed) if listed < changed_files => {
-                Completeness::Partial(PartialReason::FilesBelowChangedCount {
-                    listed,
-                    changed_files,
-                })
-            }
-            _ => Completeness::Complete,
-        },
+/// Mutable pull request endpoints are never revision-bound, so full coverage is reported
+/// as `MutableSourceUnpinned`. A coverage limit already reported is kept.
+fn unpinned(coverage: Completeness) -> Completeness {
+    match coverage {
+        Completeness::Complete => Completeness::Partial(PartialReason::MutableSourceUnpinned),
+        partial @ Completeness::Partial(_) => partial,
     }
 }
 
@@ -782,6 +771,12 @@ mod wire {
         pub changed_files: u64,
         pub body: Option<String>,
         pub updated_at: String,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Compare {
+        #[serde(default)]
+        pub files: Vec<PullFile>,
     }
 
     #[derive(Deserialize)]
