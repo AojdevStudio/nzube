@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod classify;
 pub mod client;
+pub mod connection;
 pub mod request;
 pub mod secret;
 pub mod transport;

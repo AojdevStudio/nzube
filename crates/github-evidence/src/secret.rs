@@ -16,6 +16,12 @@ impl SecretToken {
         &self.0
     }
 
+    /// The raw value, for `connection::SecretStore` adapters that write platform secure
+    /// storage. Never log, display, or export it.
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+
     /// Lets tests and callers check which credential was attached without reading it out.
     pub fn matches(&self, candidate: &str) -> bool {
         self.0 == candidate

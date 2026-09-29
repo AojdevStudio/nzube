@@ -11,6 +11,7 @@ This crate is a feasibility and core-contract unit. It does not choose the appli
 | Endpoint allowlist, input parsing, error classification, page and byte caps, pull request revision binding, redaction | Covered by 26 synthetic contract tests (`tests/contract.rs`) |
 | Anonymous reads of a public repository, including revision-bound files and diff | Exercised live against the public REST API during development |
 | GitHub App device flow, secretless refresh, and auth failure, expiry, and disconnect paths | Covered by synthetic tests only |
+| Secure-storage and disconnect lifecycle (`connection`) | Covered by 9 synthetic tests (`tests/connection.rs`) with an in-memory stand-in for platform storage. No real Keychain, Keystore, Secret Service, or Credential Manager adapter exists yet |
 | **Product authentication with a real GitHub App user token** | **Unverified.** No Nzube GitHub App is registered, so no client ID exists. See [docs/github-app-setup.md](docs/github-app-setup.md) |
 | Private repositories, revoked grants, uninstalled repositories, SSO-protected organizations | Unverified live |
 | Mobile targets (iOS, Android) | Not built. The TLS stack (`rustls` with `aws-lc-rs`) compiles C code and needs a cross-compile check |
@@ -47,6 +48,17 @@ The files and diff endpoints are mutable: they describe the pull request as it i
 - **Secrets.** `SecretToken` has a redacted `Debug` and no `Display`. Only this crate can read the value.
 - **Provenance.** Every `Fetched` names the repository it read. Every call yields a `Receipt` with method, host, path and query, status, GitHub request id, rate-limit headers, body size, body SHA-256, and the time the response arrived. A receipt never includes a credential or a body.
 - **Auth is separate.** `auth::DeviceFlow` posts only to `github.com/login/device/code` and `github.com/login/oauth/access_token`. `EvidenceClient` never sends POST and never contacts github.com. `Credential` must be chosen explicitly. The crate never reads ambient credentials such as a `gh` login or environment tokens.
+
+## Connection lifecycle
+
+`connection::Connection` keeps a user grant in a `SecretStore` that the application implements over platform secure storage. There is no file, environment, or ambient-login fallback.
+
+- **Connect.** A new grant becomes usable only after it has been saved.
+- **Expiry.** An access token within 60 seconds of expiry is refreshed without a client secret. The rotated grant is saved before the new token is returned. If that save fails, the new token is not returned, and the user must sign in again, because GitHub has already invalidated the old refresh token.
+- **Rejected or expired refresh.** A missing, expired, or rejected refresh token deletes the stored grant and returns `ReauthRequired`.
+- **Transient failures.** A transport failure or a 5xx response keeps the stored grant and returns `Refresh(error)`.
+- **Disconnect.** `disconnect` deletes the local tokens and reports `remote_grant_revoked: false` with `REVOKE_URL`, because a secretless client cannot revoke the grant on GitHub.
+- **Storage adapters.** `SecretToken::expose_secret` exists only so storage adapters can write the value. Never log or display it.
 
 ## Client ID injection
 
