@@ -33,3 +33,24 @@ export const secretServiceStore: CredentialStore = {
     await Bun.spawn(["secret-tool", "clear", "service", SERVICE, "client_id", clientId]).exited;
   },
 };
+
+/** Test-only store that lives in process memory and never touches disk or the OS keyring. */
+export function memoryStore(): CredentialStore {
+  const records = new Map<string, Credential>();
+  return {
+    async save(clientId, cred) {
+      records.set(clientId, cred);
+    },
+    async load(clientId) {
+      return records.get(clientId) ?? null;
+    },
+    async remove(clientId) {
+      records.delete(clientId);
+    },
+  };
+}
+
+/** The OS keyring, unless NZUBE_PROOF_KEYRING=memory selects the test-only store. */
+export function selectedStore(): CredentialStore {
+  return process.env.NZUBE_PROOF_KEYRING === "memory" ? memoryStore() : secretServiceStore;
+}

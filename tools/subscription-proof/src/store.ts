@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { JsonValue } from "./json";
+import { withFileLockSync } from "./lock";
 
 export type Obj = { [k: string]: JsonValue };
 
@@ -55,6 +56,36 @@ export const storeFile = join(storeDir, "store.json");
 export const blobDir = join(storeDir, "sources");
 export const evidenceFile = join(dataRoot, "evidence.json");
 export const outputsDir = join(dataRoot, "outputs");
+
+/** Serializes store read-modify-write cycles across processes. */
+export const withStoreLock = <T>(fn: () => T): T => withFileLockSync(join(storeDir, ".lock"), fn);
+
+/**
+ * Records a new pending attempt for a request and returns it with the request and its assembly.
+ * The attempt id is assigned under the store lock, so overlapping runs never reuse one.
+ */
+export function startAttempt(requestId: string, route: Route) {
+  return withStoreLock(() => {
+    const store = loadStore();
+    const req = findRequest(store, requestId);
+    const assembly = assemble(store, req, { withGuidance: true });
+    const attempt = newAttempt(req, route, assembly.sha256, assembly.included);
+    saveStore(store);
+    return { req, assembly, attempt };
+  });
+}
+
+/** Persists an attempt's current state into a fresh copy of the store, keeping other runs' changes. */
+export function finishAttempt(requestId: string, attempt: Attempt): void {
+  withStoreLock(() => {
+    const store = loadStore();
+    const req = findRequest(store, requestId);
+    const i = req.attempts.findIndex((a) => a.id === attempt.id);
+    if (i >= 0) req.attempts[i] = attempt;
+    else req.attempts.push(attempt);
+    saveStore(store);
+  });
+}
 
 export const sha256 = (data: string | Uint8Array) => new Bun.CryptoHasher("sha256").update(data).digest("hex");
 export const now = () => new Date().toISOString();
@@ -169,6 +200,10 @@ export function assemble(store: Store, req: RequestRecord, opts: { withGuidance:
 
 /** Imports a guidance file: content-addressed, versioned by name, idempotent for identical bytes. */
 export function importSource(file: string, name: string): { source: Source; reimport: boolean } {
+  return withStoreLock(() => importSourceLocked(file, name));
+}
+
+function importSourceLocked(file: string, name: string): { source: Source; reimport: boolean } {
   const store = loadStore();
   const text = readFileSync(file, "utf8");
   const hash = sha256(text);
@@ -194,6 +229,10 @@ export function importSource(file: string, name: string): { source: Source; reim
 
 /** Persists a raw request with an explicit guidance selection; returns its id. */
 export function createRequest(file: string, select: readonly string[]): string {
+  return withStoreLock(() => createRequestLocked(file, select));
+}
+
+function createRequestLocked(file: string, select: readonly string[]): string {
   const store = loadStore();
   for (const id of select) if (!store.sources.some((s) => s.id === id)) throw new Error(`unknown source ${id}`);
   const raw = readFileSync(file, "utf8");

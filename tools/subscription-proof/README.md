@@ -53,15 +53,29 @@ bun src/cli.ts infer req-1 --invalid-auth                 # real 401: failure, n
     - Token-response field names and output item types: checked against fixed allowlists.
     - Stream event names: counted only when identifier-shaped.
   - **Local values:** source ids, attempt ids, input and output hashes, sizes, and token usage counts.
-- **Exit codes:** every command exits nonzero on failure. Pressing Ctrl-C during `infer` exits 130 and keeps the partial.
+- **Exit codes:** every command exits nonzero on failure.
+  - `signin` exits 0 only when the grant includes ChatGPT plan use, and it exits as soon as the callback is handled.
+  - Pressing Ctrl-C during `infer` exits 130 and keeps the partial.
+- **Concurrency:** overlapping runs are safe.
+  - Store updates and attempt ids go through a cross-process lock file (`<data>/store/.lock`).
+  - Token refresh is serialized per session (`<data>/state/refresh.lock`), and the stored credential is re-read under the lock, as OpenAI requires for rotating refresh tokens.
+- **Streams:** they are parsed per the SSE format, so LF, CRLF, or CR line endings split anywhere across chunks all work.
 
 ## Tests
 
 ```sh
-bun run check    # bun test (25 checks) and tsc --noEmit
+bun run check    # bun test (39 checks) and tsc --noEmit
 ```
 
-The tests cover these behaviors without network access or credentials:
+The tests use no real network, credentials, or OS keyring.
+
+**Full CLI runs** against a local mock of the OpenAI endpoints (`test/mock-openai.ts`, including a real RS256-signed ID token) cover:
+
+- sign-in callbacks that succeed, arrive with the wrong state, report denied consent, or lack the plan scope, each with its exit status and a prompt exit
+- streamed generations with LF, CRLF, and CR framing, plus failed and cut streams
+- eight overlapping runs that keep every attempt with a unique id
+
+**Direct unit tests** cover:
 
 - commit rules for complete, failed, unsafe, and interrupted streams
 - identity binding before a credential is replaced
@@ -70,6 +84,10 @@ The tests cover these behaviors without network access or credentials:
 - allowlisted error diagnostics, with fixture text containing personal-looking strings that must not survive serialization
 - per-attempt history
 - CLI exit codes
+- single-flight token refresh
+- SSE framing at every chunk size
+
+**Test-only overrides.** `NZUBE_PROOF_ISSUER`, `NZUBE_PROOF_API_BASE`, and `NZUBE_PROOF_CALLBACK_PORT` point the CLI at mocks. The two URL overrides are honored only for `127.0.0.1` or `localhost`. `NZUBE_PROOF_KEYRING=memory` keeps credentials in process memory, never on disk. Real use sets none of them.
 
 ## Fixtures
 

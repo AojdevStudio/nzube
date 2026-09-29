@@ -29,18 +29,19 @@ const knownScopes = new Set(["openid", "profile", "email", "offline_access", "re
 const tokenFields = new Set(["access_token", "refresh_token", "id_token", "token_type", "expires_in", "scope", "earliest_refresh_at"]);
 /** Known scopes as granted, plus a count of any others. */
 const scopeSummary = (granted: string[]) => ({ known: granted.filter((s) => knownScopes.has(s)), unknownCount: granted.filter((s) => !knownScopes.has(s)).length });
-import { assemble, createRequest, dataRoot, findRequest, generatorInstructions, importSource, loadStore, newAttempt, now, saveStore, sha256, writeAtomic, writeAttemptText } from "./store";
-import { secretServiceStore as keyring } from "./keyring";
+import { createRequest, dataRoot, findRequest, finishAttempt, generatorInstructions, importSource, loadStore, now, sha256, startAttempt, writeAtomic, writeAttemptText } from "./store";
+import { selectedStore } from "./keyring";
+import { API_BASE, CALLBACK_PORT, ISSUER, RESOURCE } from "./endpoints";
+
+const keyring = selectedStore();
 import { httpFailure, modelsFromResponse } from "./http";
-import { applyRefresh, checkIdentityBinding, type Credential, PLAN_SCOPE, subjectBinding } from "./credentials";
+import { checkIdentityBinding, type Credential, PLAN_SCOPE, refreshSerialized, subjectBinding } from "./credentials";
+import { createSseParser } from "./sse";
 
 type Obj = { [k: string]: JsonValue };
 
 const AGENT_NAME = "Nzube"; // agent_name_hint: the app's actual name, same on every install
-const ISSUER = "https://auth.openai.com";
-const RESOURCE = "https://api.openai.com/v1";
 const SCOPES = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
-const CALLBACK_PORT = 1455;
 const REDIRECT_URI = `http://127.0.0.1:${CALLBACK_PORT}/auth/callback`;
 
 const dataDir = dataRoot;
@@ -186,7 +187,7 @@ async function signin() {
       `Started: ${now()} (listener waits up to 30 minutes)`,
       `Mode: ${reg ? "reauthorization with issued client_id" : "first-time dynamic registration (client_id=dynamic_agent_client)"}`,
       "",
-      "Open this URL in a browser on THIS machine (the callback is http://127.0.0.1:1455, which only reaches the local host):",
+      `Open this URL in a browser on THIS machine (the callback is ${REDIRECT_URI}, which only reaches the local host):`,
       "",
       authorizeUrl,
       "",
@@ -198,7 +199,10 @@ async function signin() {
   );
   console.log("WAITING");
 
-  const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new SafeError("timeout", "no callback within 30 minutes")), 30 * 60_000));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new SafeError("timeout", "no callback within 30 minutes")), 30 * 60_000);
+  });
   const evidence: Obj = { at: now(), mode: reg ? "reauth" : "dynamic-registration", redirectUri: REDIRECT_URI, requestedScopes: SCOPES, resource: RESOURCE };
   try {
     const q = await Promise.race([callback, timeout]);
@@ -253,42 +257,49 @@ async function signin() {
     evidence.outcome = "failed";
     evidence.error = errorDiagnostic(e);
   } finally {
+    clearTimeout(timer);
+    // Let the browser receive its response before connections are closed.
+    await Promise.race([server.stop(), Bun.sleep(1_000)]);
     server.stop(true);
     record("signin", evidence);
     writeFileSync(actionFile, `\nResult: ${JSON.stringify({ outcome: evidence.outcome, error: evidence.error ?? null })}\n`, { flag: "a" });
   }
   console.log(JSON.stringify(evidence, null, 2));
+  // Only a sign-in that can use the ChatGPT plan counts as success for this proof.
+  if (evidence.outcome !== "signed-in-with-plan-usage") process.exitCode = 1;
 }
 
 /** Loads the stored credential, refreshing it (rotating refresh token) when within 5 minutes of expiry. */
 async function credential(): Promise<Credential> {
   if (!existsSync(registrationFile)) throw new SafeError("auth", "not signed in: run `bun src/cli.ts signin`");
   const { client_id } = JSON.parse(readFileSync(registrationFile, "utf8")) as { client_id: string };
-  const cred = await keyring.load(client_id);
-  if (!cred) throw new SafeError("auth", "no keyring credential for the saved registration; sign in again");
-  if (!cred.scopes.includes(PLAN_SCOPE)) throw new SafeError("scope_missing", `${PLAN_SCOPE} not granted; ChatGPT plan use disabled, no fallback`);
-  if (cred.expires_at - 300 > Date.now() / 1000) return cred;
-  if (!cred.refresh_token) throw new SafeError("auth", "access token expired and no refresh token");
-  const d = await discover();
-  const res = await fetch(d.token_endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "refresh_token", client_id, refresh_token: cred.refresh_token, resource: RESOURCE }),
+  const cred = await refreshSerialized({
+    clientId: client_id,
+    lockPath: join(stateDir, "refresh.lock"),
+    store: keyring,
+    nowSeconds: () => Math.floor(Date.now() / 1000),
+    refresh: async (stale) => {
+      const d = await discover();
+      const res = await fetch(d.token_endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "refresh_token", client_id, refresh_token: stale.refresh_token ?? "", resource: RESOURCE }),
+      });
+      const { text: tokText, json: tok } = await readBody(res);
+      if (!res.ok) {
+        const failure = httpFailure(res.status, tokText, res.headers.get("x-request-id"));
+        throw new SafeError("http_error", `refresh ${failure.status} ${failure.code ?? ""}`.trim());
+      }
+      return tok;
+    },
   });
-  const { text: tokText, json: tok } = await readBody(res);
-  if (!res.ok) {
-    const failure = httpFailure(res.status, tokText, res.headers.get("x-request-id"));
-    throw new SafeError("http_error", `refresh ${failure.status} ${failure.code ?? ""}`.trim());
-  }
-  // Throws on loss of the plan scope before anything is stored, so the prior credential stays.
-  const next = applyRefresh(cred, tok, Math.floor(Date.now() / 1000), now());
-  await keyring.save(client_id, next);
-  return next;
+  if (!cred.scopes.includes(PLAN_SCOPE)) throw new SafeError("scope_missing", `${PLAN_SCOPE} not granted; ChatGPT plan use disabled, no fallback`);
+  return cred;
 }
 
 async function check() {
   const cred = await credential();
-  const res = await fetch(`${RESOURCE}/models`, { headers: { authorization: `Bearer ${cred.access_token}` } });
+  const res = await fetch(`${API_BASE}/models`, { headers: { authorization: `Bearer ${cred.access_token}` } });
   const models = modelsFromResponse(res.status, await res.text(), res.headers.get("x-request-id"));
   const result = { at: now(), status: res.status, ...models };
   record("check", result);
@@ -319,15 +330,11 @@ function usageNumbers(usage: JsonValue | undefined): Obj | null {
 const requestIdShape = (id: string | null) => (id && /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : null);
 
 async function infer(requestId: string, opts: InferOptions = { cutAfter: null, invalidAuth: false }) {
-  const store = loadStore();
-  const req = findRequest(store, requestId);
-  const assembly = assemble(store, req, { withGuidance: true });
-  const attempt = newAttempt(req, "siwc-direct", assembly.sha256, assembly.included);
-  saveStore(store);
+  const { req, assembly, attempt } = startAttempt(requestId, "siwc-direct");
   const evidence: Obj = {
     at: now(),
     route: "siwc-direct",
-    endpoint: `${RESOURCE}/responses`,
+    endpoint: `${API_BASE}/responses`,
     requestBody: { store: false, stream: true, tools: "absent" },
     requestId,
     attemptId: attempt.id ?? null,
@@ -348,7 +355,7 @@ async function infer(requestId: string, opts: InferOptions = { cutAfter: null, i
     attempt.outcome = "cancelled";
     attempt.error = "cancelled: SIGINT";
     attempt.endedAt = now();
-    saveStore(store);
+    finishAttempt(requestId, attempt);
     evidence.outcome = "cancelled";
     evidence.rawRequestPreserved = sha256(loadStore().requests.find((r) => r.id === requestId)?.raw ?? "") === req.rawSha256;
     record("infer", evidence);
@@ -357,7 +364,7 @@ async function infer(requestId: string, opts: InferOptions = { cutAfter: null, i
   const abort = new AbortController();
   try {
     const bearer = opts.invalidAuth ? "invalid-test-bearer" : (await credential()).access_token;
-    const modelsRes = await fetch(`${RESOURCE}/models`, { headers: { authorization: `Bearer ${bearer}` } });
+    const modelsRes = await fetch(`${API_BASE}/models`, { headers: { authorization: `Bearer ${bearer}` } });
     const models = modelsFromResponse(modelsRes.status, await modelsRes.text(), modelsRes.headers.get("x-request-id"));
     if (!models.ok) {
       evidence.models = models.failure;
@@ -369,7 +376,7 @@ async function infer(requestId: string, opts: InferOptions = { cutAfter: null, i
     evidence.model = model;
     evidence.listedModels = listed;
     // No `tools` field: the request body itself is tool-free.
-    const res = await fetch(`${RESOURCE}/responses`, {
+    const res = await fetch(`${API_BASE}/responses`, {
       method: "POST",
       headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
       body: JSON.stringify({ model, instructions: generatorInstructions, input: [{ role: "user", content: [{ type: "input_text", text: assembly.text }] }], store: false, stream: true }),
@@ -383,29 +390,25 @@ async function infer(requestId: string, opts: InferOptions = { cutAfter: null, i
     }
     const eventCounts: Record<string, number> = {};
     const outputItemTypes: string[] = [];
-    let terminal: Obj | null = null;
-    let buf = "";
+    let terminal = null as Obj | null; // assigned in the parser callback
     let deltas = 0;
-    for await (const chunk of res.body.pipeThrough(new TextDecoderStream())) {
-      buf += chunk;
-      let i: number;
-      while ((i = buf.indexOf("\n\n")) >= 0) {
-        const data = buf.slice(0, i).split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
-        buf = buf.slice(i + 2);
-        if (!data || data === "[DONE]") continue;
-        const ev = JSON.parse(data) as Obj;
-        const type = String(ev.type);
-        eventCounts[type] = (eventCounts[type] ?? 0) + 1;
-        if (type === "response.output_text.delta") {
-          text += String(ev.delta);
-          deltas += 1;
-          if (deltas === 1) console.error("STREAMING");
-          if (opts.cutAfter !== null && deltas >= opts.cutAfter) abort.abort();
-        }
-        if (type === "response.output_item.added") outputItemTypes.push(String((ev.item as Obj).type));
-        if (type === "response.completed" || type === "response.failed" || type === "response.incomplete") terminal = ev;
+    const parser = createSseParser();
+    const handle = (data: string) => {
+      if (data === "[DONE]") return;
+      const ev = JSON.parse(data) as Obj;
+      const type = String(ev.type);
+      eventCounts[type] = (eventCounts[type] ?? 0) + 1;
+      if (type === "response.output_text.delta") {
+        text += String(ev.delta);
+        deltas += 1;
+        if (deltas === 1) console.error("STREAMING");
+        if (opts.cutAfter !== null && deltas >= opts.cutAfter) abort.abort();
       }
-    }
+      if (type === "response.output_item.added") outputItemTypes.push(String((ev.item as Obj).type));
+      if (type === "response.completed" || type === "response.failed" || type === "response.incomplete") terminal = ev;
+    };
+    for await (const chunk of res.body.pipeThrough(new TextDecoderStream())) for (const data of parser.push(chunk)) handle(data);
+    for (const data of parser.end()) handle(data);
     const response = (terminal?.response ?? {}) as Obj;
     evidence.stream = { eventCounts: shapedCounts(eventCounts), outputItemTypes: outputItemTypes.map((t) => allowlisted(t, responseItemTypes, "unknown_item")), terminal: terminal?.type ?? "stream ended without terminal event", usage: usageNumbers(response.usage), servedModel: allowlisted(response.model, new Set(listed), "unlisted_model"), errorCode: providerCode((response.error as Obj | null)?.code) };
     // Tool items are checked before anything is committed; only a completed, tool-free stream writes output.md.
@@ -436,7 +439,7 @@ async function infer(requestId: string, opts: InferOptions = { cutAfter: null, i
     evidence.error = attempt.error;
   } finally {
     attempt.endedAt = now();
-    saveStore(store);
+    finishAttempt(requestId, attempt);
     evidence.rawRequestPreserved = sha256(loadStore().requests.find((r) => r.id === requestId)?.raw ?? "") === req.rawSha256;
     record("infer", evidence);
   }
