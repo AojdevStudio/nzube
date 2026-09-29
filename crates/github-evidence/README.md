@@ -8,10 +8,10 @@ This crate is a feasibility and core-contract unit. It does not choose the appli
 
 | Capability | State |
 | --- | --- |
-| Endpoint allowlist, input parsing, error classification, page and byte caps, revision provenance for pull request content, redaction | Covered by 27 synthetic contract tests (`tests/contract.rs`) |
+| Endpoint allowlist, input parsing, error classification, page and byte caps, revision provenance for pull request content, redaction | Covered by 28 synthetic contract tests (`tests/contract.rs`) |
 | Anonymous reads of a public repository, including fixed-SHA compare files and diff | Exercised live against the public REST API during development |
 | GitHub App device flow, secretless refresh, and auth failure, expiry, and disconnect paths | Covered by synthetic tests only |
-| Secure-storage and disconnect lifecycle (`connection`) | Covered by 9 synthetic tests (`tests/connection.rs`) with an in-memory stand-in for platform storage. No real Keychain, Keystore, Secret Service, or Credential Manager adapter exists yet |
+| Secure-storage and disconnect lifecycle (`connection`) | Covered by 14 synthetic tests (`tests/connection.rs`) with an in-memory stand-in for platform storage. No real Keychain, Keystore, Secret Service, or Credential Manager adapter exists yet |
 | **Product authentication with a real GitHub App user token** | **Unverified.** No Nzube GitHub App is registered, so no client ID exists. See [docs/github-app-setup.md](docs/github-app-setup.md) |
 | Private repositories, revoked grants, uninstalled repositories, SSO-protected organizations | Unverified live |
 | Mobile targets (iOS, Android) | Not built. The TLS stack (`rustls` with `aws-lc-rs`) compiles C code and needs a cross-compile check |
@@ -59,7 +59,12 @@ A 404, missing fork object, byte cap, or malformed response from compare stays a
 - **Connect.** A new grant becomes usable only after it has been saved.
 - **Expiry.** An access token within 60 seconds of expiry is refreshed without a client secret. The rotated grant is saved before the new token is returned. If that save fails, the new token is not returned, and the user must sign in again, because GitHub has already invalidated the old refresh token.
 - **Rejected or expired refresh.** A missing, expired, or rejected refresh token deletes the stored grant and returns `ReauthRequired`.
-- **Concurrent refresh.** A refresh token works once. When two callers refresh the same expired grant, the loser is refused. It deletes the stored grant only through `SecretStore::delete_if_refresh`, which the store must perform as one atomic compare-and-delete, and only while the grant still holds the refresh token it used. If another caller already rotated the grant, the loser returns the rotated access token instead.
+- **Concurrent callers and disconnect.** A refresh token works once, and callers may race. Every write that `credential` makes goes through `SecretStore::replace_if_current`. That covers saving a rotated grant and deleting a grant that is expired, has no refresh token, or was refused. The store must perform it as one atomic compare-and-swap against the exact grant the call loaded, every token and expiry included. If the stored grant changed during the call, nothing is written and the call re-reads the store:
+  - An empty store means a disconnect happened. The disconnect wins with `NotConnected`, and a freshly rotated token is discarded.
+  - A newer usable grant is returned.
+  - A newer grant that has also expired gives `Superseded`.
+
+  `connect` and `disconnect` are explicit user actions and write unconditionally.
 - **Retryable failures.** Only an explicit refusal deletes the stored grant: an OAuth error response, or a 400 or 401 from the token endpoint. Throttling (429), other statuses, transport failures, and malformed responses keep the grant and return `Refresh(error)` for a retry.
 - **Disconnect.** `disconnect` deletes the local tokens and reports `remote_grant_revoked: false` with `REVOKE_URL`, because a secretless client cannot revoke the grant on GitHub.
 - **Storage adapters.** `SecretToken::expose_secret` exists only so storage adapters can write the value. Never log or display it.

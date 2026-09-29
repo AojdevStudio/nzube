@@ -775,7 +775,7 @@ mod wire {
 
     #[derive(Deserialize)]
     pub struct Compare {
-        #[serde(default)]
+        /// Required: a response without it is malformed, never an empty complete list.
         pub files: Vec<PullFile>,
     }
 

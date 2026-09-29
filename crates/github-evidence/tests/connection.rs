@@ -91,18 +91,7 @@ impl SecretStore for &MemoryKeychain {
         if self.fail_save {
             return Err(StoreError::WriteFailed);
         }
-        let opt = |n: Option<u64>| n.map(|n| n.to_string()).unwrap_or_default();
-        *self.item.lock().unwrap() = Some(format!(
-            "{}\n{}\n{}\n{}",
-            grant.access_token.expose_secret(),
-            opt(grant.access_expires_at),
-            grant
-                .refresh_token
-                .as_ref()
-                .map(SecretToken::expose_secret)
-                .unwrap_or_default(),
-            opt(grant.refresh_expires_at),
-        ));
+        *self.item.lock().unwrap() = Some(serialize(grant));
         Ok(())
     }
 
@@ -111,15 +100,37 @@ impl SecretStore for &MemoryKeychain {
         Ok(())
     }
 
-    fn delete_if_refresh(&self, refresh_token: &SecretToken) -> Result<bool, StoreError> {
-        let mut item = self.item.lock().unwrap();
-        let holds = item.as_deref().and_then(|raw| raw.split('\n').nth(2))
-            == Some(refresh_token.expose_secret());
-        if holds {
-            *item = None;
+    fn replace_if_current(
+        &self,
+        expected: &StoredGrant,
+        next: Option<&StoredGrant>,
+    ) -> Result<bool, StoreError> {
+        if self.fail_save {
+            return Err(StoreError::WriteFailed);
         }
-        Ok(holds)
+        let mut item = self.item.lock().unwrap();
+        if item.as_deref() != Some(serialize(expected).as_str()) {
+            return Ok(false);
+        }
+        *item = next.map(serialize);
+        Ok(true)
     }
+}
+
+/// The keychain item's bytes: the four fields, one per line.
+fn serialize(grant: &StoredGrant) -> String {
+    let opt = |n: Option<u64>| n.map(|n| n.to_string()).unwrap_or_default();
+    format!(
+        "{}\n{}\n{}\n{}",
+        grant.access_token.expose_secret(),
+        opt(grant.access_expires_at),
+        grant
+            .refresh_token
+            .as_ref()
+            .map(SecretToken::expose_secret)
+            .unwrap_or_default(),
+        opt(grant.refresh_expires_at),
+    )
 }
 
 impl MemoryKeychain {
@@ -383,8 +394,12 @@ impl SecretStore for &LoadedBeforeRotation<'_> {
     fn delete(&self) -> Result<(), StoreError> {
         (&self.shared).delete()
     }
-    fn delete_if_refresh(&self, refresh_token: &SecretToken) -> Result<bool, StoreError> {
-        (&self.shared).delete_if_refresh(refresh_token)
+    fn replace_if_current(
+        &self,
+        expected: &StoredGrant,
+        next: Option<&StoredGrant>,
+    ) -> Result<bool, StoreError> {
+        (&self.shared).replace_if_current(expected, next)
     }
 }
 
@@ -420,4 +435,98 @@ async fn losing_concurrent_refresh_keeps_the_rotated_grant() {
         "the losing refresh deleted the rotated grant"
     );
     assert!(token_of(credential.unwrap()).matches("ghu_ROTATED_ACCESS"));
+}
+
+/// Deletes the keychain item (a disconnect) while the refresh request is in flight, then
+/// answers the refresh successfully.
+struct DisconnectDuringRefresh<'a>(&'a MemoryKeychain);
+
+impl Transport for DisconnectDuringRefresh<'_> {
+    async fn send(&self, _: &HttpRequest, _: usize) -> Result<HttpResponse, TransportError> {
+        self.0.delete().unwrap();
+        Ok(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: ROTATED.as_bytes().to_vec(),
+            body_truncated: false,
+        })
+    }
+}
+
+#[tokio::test]
+async fn disconnect_during_refresh_is_not_undone() {
+    let store = MemoryKeychain::default();
+    (&store)
+        .save(&StoredGrant::from_grant(
+            &grant(Some(10), Some((REFRESH, 15_897_600))),
+            NOW,
+        ))
+        .unwrap();
+    let flow = DeviceFlow::new(
+        DisconnectDuringRefresh(&store),
+        ClientId::parse("Iv23liFIXTURE000").unwrap(),
+    );
+    let result = Connection::new(&store, flow).credential(NOW + 1_000).await;
+    assert!(
+        store.raw().is_none(),
+        "refresh resurrected a disconnected grant"
+    );
+    assert_eq!(result.unwrap_err(), ConnectionError::NotConnected);
+}
+
+#[tokio::test]
+async fn stale_grant_without_refresh_cannot_delete_a_newer_connection() {
+    let shared = MemoryKeychain::default();
+    let fixture = Fixture::default();
+    connection(&shared, &fixture)
+        .connect(&grant(Some(10), None), NOW)
+        .unwrap();
+    let stale = (&shared).load().unwrap();
+    // A new sign-in lands after the stale caller loaded the old grant.
+    connection(&shared, &fixture)
+        .connect(&grant(Some(28_800), Some((REFRESH, 15_897_600))), NOW)
+        .unwrap();
+    let stale_view = LoadedBeforeRotation {
+        shared: &shared,
+        stale: Mutex::new(stale),
+    };
+    let flow = DeviceFlow::new(&fixture, ClientId::parse("Iv23liFIXTURE000").unwrap());
+    let result = Connection::new(&stale_view, flow)
+        .credential(NOW + 1_000)
+        .await;
+    assert!(
+        shared.raw().is_some_and(|raw| raw.contains(REFRESH)),
+        "stale credential deleted a new connection"
+    );
+    assert!(token_of(result.unwrap()).matches(ACCESS));
+    assert!(fixture.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn newer_but_expired_grant_is_left_alone_and_reported_superseded() {
+    let shared = MemoryKeychain::default();
+    let fixture = Fixture::default();
+    connection(&shared, &fixture)
+        .connect(&grant(Some(10), None), NOW)
+        .unwrap();
+    let stale = (&shared).load().unwrap();
+    // A newer grant replaces it, but it is also expired at the time of the call.
+    connection(&shared, &fixture)
+        .connect(&grant(Some(20), Some((REFRESH, 100))), NOW)
+        .unwrap();
+    let newer = shared.raw();
+    let stale_view = LoadedBeforeRotation {
+        shared: &shared,
+        stale: Mutex::new(stale),
+    };
+    let flow = DeviceFlow::new(&fixture, ClientId::parse("Iv23liFIXTURE000").unwrap());
+    let result = Connection::new(&stale_view, flow)
+        .credential(NOW + 1_000)
+        .await;
+    assert_eq!(result.unwrap_err(), ConnectionError::Superseded);
+    assert_eq!(
+        shared.raw(),
+        newer,
+        "the stale caller changed the newer grant"
+    );
 }

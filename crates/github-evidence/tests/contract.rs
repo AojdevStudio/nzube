@@ -1288,3 +1288,16 @@ async fn aba_revision_change_never_stamps_content_from_another_revision() {
         );
     }
 }
+
+#[tokio::test]
+async fn compare_response_without_files_is_malformed_never_complete() {
+    let fixture = Fixture::with([reply(200, &[], r#"{"status":"ahead","commits":[]}"#)]);
+    let fetched = client(&fixture, Limits::default())
+        .fetch(&EvidenceRequest::CompareFiles { revisions: revs() })
+        .await;
+    assert!(
+        matches!(fetched.result, Err(FetchError::Malformed(_))),
+        "{:?}",
+        fetched.result
+    );
+}

@@ -56,11 +56,16 @@ pub trait SecretStore {
     fn load(&self) -> Result<Option<StoredGrant>, StoreError>;
     fn save(&self, grant: &StoredGrant) -> Result<(), StoreError>;
     fn delete(&self) -> Result<(), StoreError>;
-    /// Deletes the stored grant only if its refresh token is still `refresh_token`, and
-    /// reports whether it did. Implementations must make the compare and the delete one
-    /// atomic step, so a caller whose refresh lost a race cannot delete the grant the
-    /// winning caller just saved.
-    fn delete_if_refresh(&self, refresh_token: &SecretToken) -> Result<bool, StoreError>;
+    /// Replaces the stored grant with `next`, or deletes it when `next` is `None`, only if
+    /// the store still holds exactly `expected` (every token and expiry time). Returns
+    /// whether it did. The compare and the write must be one atomic step: this is what
+    /// stops a stale caller from overwriting or deleting a newer grant, and an in-flight
+    /// refresh from bringing back a grant after a disconnect.
+    fn replace_if_current(
+        &self,
+        expected: &StoredGrant,
+        next: Option<&StoredGrant>,
+    ) -> Result<bool, StoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +85,10 @@ pub enum ConnectionError {
     ReauthRequired(ReauthReason),
     #[error("secure storage: {0}")]
     Store(StoreError),
+    /// The stored grant changed while this call ran and the newer grant is not usable
+    /// at `now` either. Call `credential` again.
+    #[error("the stored GitHub grant changed during this call; try again")]
+    Superseded,
     /// A refresh failure that is not a rejection, such as 429, 5xx, or a transport error.
     /// The stored grant is kept for a later retry.
     #[error("token refresh failed: {0}")]
@@ -122,26 +131,30 @@ impl<S: SecretStore, T: Transport> Connection<S, T> {
             return Ok(Credential::UserToken(stored.access_token));
         }
         let Some(refresh_token) = &stored.refresh_token else {
-            return self.forget(ReauthReason::NoRefreshToken);
+            return self.retire(&stored, ReauthReason::NoRefreshToken, now);
         };
         if stored.refresh_expires_at.is_some_and(|exp| now >= exp) {
-            return self.forget_unless_rotated(refresh_token, ReauthReason::RefreshExpired, now);
+            return self.retire(&stored, ReauthReason::RefreshExpired, now);
         }
         let rotated = match self.flow.refresh(refresh_token).await {
             Ok(grant) => StoredGrant::from_grant(&grant, now),
             Err(error) if is_rejection(&error) => {
-                return self.forget_unless_rotated(
-                    refresh_token,
-                    ReauthReason::RefreshRejected,
-                    now,
-                );
+                return self.retire(&stored, ReauthReason::RefreshRejected, now);
             }
             Err(retryable) => return Err(ConnectionError::Refresh(retryable)),
         };
-        // GitHub has already invalidated the old refresh token, so a failed save means
-        // the user must sign in again; the rotated token is not handed out unsaved.
-        self.store.save(&rotated).map_err(ConnectionError::Store)?;
-        Ok(Credential::UserToken(rotated.access_token))
+        // Save only if the grant this call loaded is still the stored one. A disconnect or
+        // newer sign-in during the refresh wins, and the rotated token is then discarded.
+        // GitHub has already invalidated the old refresh token, so a failed save means the
+        // rotated token is never handed out unsaved.
+        if self
+            .store
+            .replace_if_current(&stored, Some(&rotated))
+            .map_err(ConnectionError::Store)?
+        {
+            return Ok(Credential::UserToken(rotated.access_token));
+        }
+        self.current_after_race(now)
     }
 
     /// Local disconnect: deletes stored tokens. Revocation on GitHub is the user's
@@ -154,32 +167,33 @@ impl<S: SecretStore, T: Transport> Connection<S, T> {
         })
     }
 
-    /// Deletes the grant only if it still holds `used`. If another caller rotated it after
-    /// this one loaded it, returns the rotated grant's access token instead.
-    fn forget_unless_rotated(
+    /// Deletes `stored` because it can no longer produce a token, unless another caller
+    /// replaced or removed it after this call loaded it.
+    fn retire(
         &self,
-        used: &SecretToken,
+        stored: &StoredGrant,
         reason: ReauthReason,
         now: u64,
     ) -> Result<Credential, ConnectionError> {
         if self
             .store
-            .delete_if_refresh(used)
+            .replace_if_current(stored, None)
             .map_err(ConnectionError::Store)?
         {
             return Err(ConnectionError::ReauthRequired(reason));
         }
+        self.current_after_race(now)
+    }
+
+    /// The store changed while this call ran. An empty store means a disconnect, which wins.
+    fn current_after_race(&self, now: u64) -> Result<Credential, ConnectionError> {
         match self.store.load().map_err(ConnectionError::Store)? {
+            None => Err(ConnectionError::NotConnected),
             Some(current) if current.access_valid(now) => {
                 Ok(Credential::UserToken(current.access_token))
             }
-            _ => Err(ConnectionError::ReauthRequired(reason)),
+            Some(_) => Err(ConnectionError::Superseded),
         }
-    }
-
-    fn forget(&self, reason: ReauthReason) -> Result<Credential, ConnectionError> {
-        self.store.delete().map_err(ConnectionError::Store)?;
-        Err(ConnectionError::ReauthRequired(reason))
     }
 }
 
