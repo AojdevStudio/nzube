@@ -60,15 +60,16 @@ bun src/cli.ts infer req-1 --invalid-auth                 # real 401: failure, n
   - Store updates and attempt ids go through `<data>/store/.lock`.
   - Evidence appends go through `<data>/evidence.json.lock`.
   - Token refresh is serialized per session (`<data>/state/refresh.lock`), and the stored credential is re-read under the lock, as OpenAI requires for rotating refresh tokens.
-  - A lock whose owner process no longer exists is taken over.
+  - The locks are kernel advisory locks (`flock(2)` through Bun's FFI, Linux with glibc). The kernel releases a lock when its owner exits or crashes, and lock files are never deleted, so no process can take over or remove a lock that a live process holds.
+  - If `flock` cannot be loaded, commands fail with a storage error instead of running unlocked.
   - Tests check 8 overlapping failed runs and 40 overlapping successful runs, including one evidence entry per generated attempt.
-  - Takeover of a crashed owner's lock is not covered by an atomic compare-and-remove. Two waiters could in principle both clear the same stale lock. A 960-process probe did not observe it.
+  - Tests also cover a live owner whose lock file names a dead process, and recovery after an owner is killed.
 - **Streams:** they are parsed per the SSE format, so LF, CRLF, or CR line endings split anywhere across chunks all work.
 
 ## Tests
 
 ```sh
-bun run check    # bun test (40 checks) and tsc --noEmit
+bun run check    # bun test (43 checks) and tsc --noEmit
 ```
 
 The tests use no real network, credentials, or OS keyring.
@@ -90,6 +91,7 @@ The tests use no real network, credentials, or OS keyring.
 - CLI exit codes
 - single-flight token refresh
 - SSE framing at every chunk size
+- lock ownership across processes: a live owner whose lock file names a dead process keeps the lock, and a killed owner releases it with no takeover step
 
 **Test-only overrides.** `NZUBE_PROOF_ISSUER`, `NZUBE_PROOF_API_BASE`, and `NZUBE_PROOF_CALLBACK_PORT` point the CLI at mocks. The two URL overrides are honored only for `127.0.0.1` or `localhost`. `NZUBE_PROOF_KEYRING=memory` keeps credentials in process memory, never on disk. Real use sets none of them.
 
