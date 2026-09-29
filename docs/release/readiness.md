@@ -28,7 +28,7 @@ The following results are separate from the unbuilt product above. The [compatib
 
 | Target | Architectural proof | Limits |
 | --- | --- | --- |
-| Linux | Real direct ChatGPT consent, secure storage, completed generation with selected original guidance, persistence, byte-identical export, cancellation, interrupted stream, and invalid-bearer handling | CLI proof only. No installed product, dedicated GitHub onboarding, repository-grounded generation, live refresh, or billing-meter check |
+| Linux | Real direct ChatGPT consent, secure storage, completed generation with selected original guidance, persistence, byte-identical export, live token refresh, cancellation, interrupted stream, and invalid-bearer handling | CLI proof only. No installed product, dedicated GitHub onboarding, repository-grounded generation, or billing-meter check |
 | macOS | No subscription CLI or product installation verified | An iOS simulator hosted on macOS does not establish a macOS product |
 | Windows | No build, installation, or runtime exercise | Unverified |
 | iOS | Private simulator proof app built and installed; reference persistence, Keychain sentinel, and delayed fixture callback recorded | Actual provider consent, token exchange, inference, user cancellation, signing, and physical-device flow remain unverified |

@@ -4,7 +4,7 @@ Evidence date: 2026-09-29. This is a feasibility record, not a list of shipped f
 
 | Integration | Desktop | iOS and Android | Billing | Dependencies | Evidence status |
 | --- | --- | --- | --- | --- | --- |
-| OpenAI OSS Sign in with ChatGPT | Linux consent, secure storage, completed inference, persistence, and export exercised; macOS and Windows unverified | Actual provider login and completed inference unverified; loopback lifecycle remains under investigation | ChatGPT plan route inferred from granted OAuth scope and documented protocol; usage meter not inspected | Direct provider connection, browser consent, platform secure storage; no Nzube account, Codex runtime, or hosted backend needed for the demonstrated Linux route | Five real completed generations using `gpt-5.6-luna`; reproducible CLI and receipt proposed in [PR #2](https://github.com/AojdevStudio/nzube/pull/2) |
+| OpenAI OSS Sign in with ChatGPT | Linux consent, secure storage, completed inference, persistence, and export exercised; macOS and Windows unverified | Actual provider login and completed inference unverified; loopback lifecycle remains under investigation | ChatGPT plan route inferred from granted OAuth scope and documented protocol; usage meter not inspected | Direct provider connection, browser consent, platform secure storage; no Nzube account, Codex runtime, or hosted backend needed for the demonstrated Linux route | Six real completed generations using `gpt-5.6-luna`; reproducible CLI and receipt proposed in [PR #2](https://github.com/AojdevStudio/nzube/pull/2) |
 | Codex app-server | Documented local host integration | Codex runtime has not been demonstrated on mobile | ChatGPT login or separately billed API mode; prototype permits ChatGPT only | Installed desktop Codex CLI and isolated Nzube-owned session; mobile would require a separately proven companion | Private persistence/cancellation/auth-failure experiment recorded; reproducible proof not yet included in this PR; real generation awaits separate login |
 | GitHub Copilot SDK | Desktop runtime documented | Native runtime packaging unverified | Copilot subscription allowance; BYOK is a distinct API route | SDK runtime and GitHub/Copilot authorization | Documentation inspected; no Nzube runtime proof |
 | Anthropic API / Agent SDK | API integration possible | Direct HTTP API transport possible; runtime proof absent | Separately billed API | Explicit provider credentials | Not implemented; do not promise third-party claude.ai subscription access without provider approval |
@@ -18,7 +18,9 @@ The [public proof receipt](https://github.com/AojdevStudio/nzube/blob/1dc78c5eee
 
 The requests were synthetic. They contained no retrieved repository evidence. One guidance rule incorrectly asked a read-only investigation for a failing test. A revised source version restricted that rule to authorized implementation, and a real regenerated brief explicitly forbade creating or modifying tests. The refinement case returned the complete brief and changed exactly the requested line. These examples support the route and expose a prompt-quality defect; they do not establish broad output quality.
 
-Live provider token refresh, remote sign-out, installed macOS and Windows operation, and actual mobile provider authentication remain unverified.
+A further run through the public CLI at `d962cb2` exercised live token refresh, model retrieval, and a completed response. Its saved brief and export contained the same 3,236 bytes with SHA-256 `1521adb6d73f67af9a489c625927ebb45d501663af49b6d86af6eeef884f3425`. The read-only endpoint held, but the output classified some user-supplied facts as verified. Evidence classification still needs evaluation.
+
+Remote sign-out, installed macOS and Windows operation, and actual mobile provider authentication remain unverified.
 
 ## Provider choice under investigation
 
