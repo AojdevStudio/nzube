@@ -56,6 +56,11 @@ pub trait SecretStore {
     fn load(&self) -> Result<Option<StoredGrant>, StoreError>;
     fn save(&self, grant: &StoredGrant) -> Result<(), StoreError>;
     fn delete(&self) -> Result<(), StoreError>;
+    /// Deletes the stored grant only if its refresh token is still `refresh_token`, and
+    /// reports whether it did. Implementations must make the compare and the delete one
+    /// atomic step, so a caller whose refresh lost a race cannot delete the grant the
+    /// winning caller just saved.
+    fn delete_if_refresh(&self, refresh_token: &SecretToken) -> Result<bool, StoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,12 +125,16 @@ impl<S: SecretStore, T: Transport> Connection<S, T> {
             return self.forget(ReauthReason::NoRefreshToken);
         };
         if stored.refresh_expires_at.is_some_and(|exp| now >= exp) {
-            return self.forget(ReauthReason::RefreshExpired);
+            return self.forget_unless_rotated(refresh_token, ReauthReason::RefreshExpired, now);
         }
         let rotated = match self.flow.refresh(refresh_token).await {
             Ok(grant) => StoredGrant::from_grant(&grant, now),
             Err(error) if is_rejection(&error) => {
-                return self.forget(ReauthReason::RefreshRejected);
+                return self.forget_unless_rotated(
+                    refresh_token,
+                    ReauthReason::RefreshRejected,
+                    now,
+                );
             }
             Err(retryable) => return Err(ConnectionError::Refresh(retryable)),
         };
@@ -143,6 +152,29 @@ impl<S: SecretStore, T: Transport> Connection<S, T> {
             remote_grant_revoked: false,
             revoke_url: REVOKE_URL,
         })
+    }
+
+    /// Deletes the grant only if it still holds `used`. If another caller rotated it after
+    /// this one loaded it, returns the rotated grant's access token instead.
+    fn forget_unless_rotated(
+        &self,
+        used: &SecretToken,
+        reason: ReauthReason,
+        now: u64,
+    ) -> Result<Credential, ConnectionError> {
+        if self
+            .store
+            .delete_if_refresh(used)
+            .map_err(ConnectionError::Store)?
+        {
+            return Err(ConnectionError::ReauthRequired(reason));
+        }
+        match self.store.load().map_err(ConnectionError::Store)? {
+            Some(current) if current.access_valid(now) => {
+                Ok(Credential::UserToken(current.access_token))
+            }
+            _ => Err(ConnectionError::ReauthRequired(reason)),
+        }
     }
 
     fn forget(&self, reason: ReauthReason) -> Result<Credential, ConnectionError> {

@@ -110,6 +110,16 @@ impl SecretStore for &MemoryKeychain {
         *self.item.lock().unwrap() = None;
         Ok(())
     }
+
+    fn delete_if_refresh(&self, refresh_token: &SecretToken) -> Result<bool, StoreError> {
+        let mut item = self.item.lock().unwrap();
+        let holds = item.as_deref().and_then(|raw| raw.split('\n').nth(2))
+            == Some(refresh_token.expose_secret());
+        if holds {
+            *item = None;
+        }
+        Ok(holds)
+    }
 }
 
 impl MemoryKeychain {
@@ -351,4 +361,63 @@ async fn throttled_or_ambiguous_refresh_keeps_the_stored_grant() {
             "{status} deleted a grant GitHub did not reject"
         );
     }
+}
+
+/// A second caller that loaded the grant before the first caller rotated it. Its first
+/// load returns the stale snapshot; everything else goes to the shared keychain.
+struct LoadedBeforeRotation<'a> {
+    shared: &'a MemoryKeychain,
+    stale: Mutex<Option<StoredGrant>>,
+}
+
+impl SecretStore for &LoadedBeforeRotation<'_> {
+    fn load(&self) -> Result<Option<StoredGrant>, StoreError> {
+        match self.stale.lock().unwrap().take() {
+            Some(stale) => Ok(Some(stale)),
+            None => (&self.shared).load(),
+        }
+    }
+    fn save(&self, grant: &StoredGrant) -> Result<(), StoreError> {
+        (&self.shared).save(grant)
+    }
+    fn delete(&self) -> Result<(), StoreError> {
+        (&self.shared).delete()
+    }
+    fn delete_if_refresh(&self, refresh_token: &SecretToken) -> Result<bool, StoreError> {
+        (&self.shared).delete_if_refresh(refresh_token)
+    }
+}
+
+#[tokio::test]
+async fn losing_concurrent_refresh_keeps_the_rotated_grant() {
+    let shared = MemoryKeychain::default();
+    let first = Fixture::with([(200, ROTATED)]);
+    connection(&shared, &first)
+        .connect(&grant(Some(10), Some((REFRESH, 15_897_600))), NOW)
+        .unwrap();
+    let stale = (&shared).load().unwrap();
+
+    // The first caller refreshes and saves the rotated grant.
+    let later = NOW + 1_000;
+    assert!(
+        token_of(connection(&shared, &first).credential(later).await.unwrap())
+            .matches("ghu_ROTATED_ACCESS")
+    );
+
+    // The second caller refreshes the already-used token and is refused.
+    let second_view = LoadedBeforeRotation {
+        shared: &shared,
+        stale: Mutex::new(stale),
+    };
+    let second = Fixture::with([(200, r#"{"error":"bad_refresh_token"}"#)]);
+    let flow = DeviceFlow::new(&second, ClientId::parse("Iv23liFIXTURE000").unwrap());
+    let credential = Connection::new(&second_view, flow).credential(later).await;
+
+    assert!(
+        shared
+            .raw()
+            .is_some_and(|raw| raw.contains("ghr_ROTATED_REFRESH")),
+        "the losing refresh deleted the rotated grant"
+    );
+    assert!(token_of(credential.unwrap()).matches("ghu_ROTATED_ACCESS"));
 }
