@@ -30,7 +30,7 @@ A small Bun and TypeScript CLI that proves Nzube can generate an execution brief
 ```sh
 cd tools/subscription-proof
 bun install
-bun src/cli.ts selftest                                   # offline: PKCE vector, keyring round trip, OIDC discovery
+bun src/cli.ts selftest                                   # no sign-in; fetches OIDC discovery (network), writes and clears a dummy keyring entry, checks the PKCE vector
 bun src/cli.ts import fixtures/guidance.md --name brief-guidance
 bun src/cli.ts request fixtures/request.md --select brief-guidance@v1
 bun src/cli.ts signin                                     # open the printed URL (see <data>/signin-action.md), consent
@@ -42,7 +42,17 @@ bun src/cli.ts infer req-1 --invalid-auth                 # real 401: failure, n
 ```
 
 - **Data location:** `$NZUBE_PROOF_DATA`, else `$XDG_STATE_HOME/nzube-subscription-proof`, else `~/.local/state/nzube-subscription-proof`. It holds the store, per-attempt outputs and partials, exports, non-secret registration metadata, and `evidence.json`.
-- **Evidence contents:** `evidence.json` holds only fixed categories, allowlisted documented error codes, and numbers. Server text, response bodies, and unknown codes are never written.
+- **Evidence contents:** `evidence.json` never holds tokens or response bodies.
+  - **Errors:** stored as a fixed category plus a fixed local reason, the HTTP status, a documented error code (anything else becomes `unknown_provider_error`), and the body length. Provider messages, descriptions and `detail` text are never written.
+  - **Other server-supplied values:** some are stored without content validation:
+    - the OIDC discovery document (`selftest`)
+    - model slugs from `/v1/models` (the listed models and the selected model in `check` and `infer`; the served model only when it matches a listed slug)
+    - `x-request-id` values, kept only when they have an opaque token shape
+  - **Server values with limits applied:**
+    - Granted scopes: only known scopes are kept, plus a count of the others.
+    - Token-response field names and output item types: checked against fixed allowlists.
+    - Stream event names: counted only when identifier-shaped.
+  - **Local values:** source ids, attempt ids, input and output hashes, sizes, and token usage counts.
 - **Exit codes:** every command exits nonzero on failure. Pressing Ctrl-C during `infer` exits 130 and keeps the partial.
 
 ## Tests
@@ -57,7 +67,7 @@ The tests cover these behaviors without network access or credentials:
 - identity binding before a credential is replaced
 - refresh rejection when the plan scope is lost
 - non-2xx handling
-- allowlisted diagnostics, with fixture text containing personal-looking strings that must not survive serialization
+- allowlisted error diagnostics, with fixture text containing personal-looking strings that must not survive serialization
 - per-attempt history
 - CLI exit codes
 
