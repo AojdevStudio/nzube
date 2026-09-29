@@ -992,7 +992,13 @@ async fn pull_files_and_diff_are_read_from_compare_pinned_to_their_revisions() {
     else {
         panic!("{:?}", fetched.result)
     };
-    assert_eq!((revisions, completeness), (revs(), Completeness::Complete));
+    assert_eq!(
+        (revisions, completeness),
+        (
+            revs(),
+            Completeness::Partial(PartialReason::DiffMayBeServerLimited)
+        )
+    );
     let seen = fixture.seen();
     assert_eq!(
         (seen.len(), seen[0].url.path(), seen[0].header("accept")),
@@ -1299,5 +1305,24 @@ async fn compare_response_without_files_is_malformed_never_complete() {
         matches!(fetched.result, Err(FetchError::Malformed(_))),
         "{:?}",
         fetched.result
+    );
+}
+
+/// GitHub may drop parts of a rendered diff beyond its documented limits (300 files, 1 MB
+/// total, 500 KB or 20,000 lines per file) without marking the cut, so a diff that fits the
+/// local byte cap still cannot be proven complete.
+#[tokio::test]
+async fn compare_diff_is_never_claimed_complete() {
+    let fixture = Fixture::with([reply(200, &[], "diff --git a/a b/a\n+small\n")]);
+    let fetched = client(&fixture, Limits::default())
+        .fetch(&EvidenceRequest::CompareDiff { revisions: revs() })
+        .await;
+    let Ok(Evidence::CompareDiff { completeness, .. }) = fetched.result else {
+        panic!("{:?}", fetched.result)
+    };
+    assert_eq!(
+        completeness,
+        Completeness::Partial(PartialReason::DiffMayBeServerLimited),
+        "a server-limited diff was labeled complete"
     );
 }

@@ -68,6 +68,10 @@ pub enum PartialReason {
     /// The content came from a mutable pull request endpoint, so it cannot be attributed
     /// to a specific base and head. Used in place of `Complete` for those endpoints.
     MutableSourceUnpinned,
+    /// GitHub may leave parts of a rendered diff out when it exceeds GitHub's diff limits
+    /// (300 files, 1 MB total, 500 KB or 20,000 lines per file) without marking the cut,
+    /// so diff text is never reported complete. Used in place of `Complete` for diffs.
+    DiffMayBeServerLimited,
     /// The compare endpoint lists at most 300 changed files. A list that reaches the
     /// limit may be cut short, and the response carries no total to check against.
     CompareFileLimit {
@@ -188,7 +192,8 @@ pub enum Evidence {
         revisions: PullRevisions,
         files: Paged<PullFileDoc>,
     },
-    /// From compare pinned to `revisions`. Binary changes have no text patch in a diff.
+    /// From compare pinned to `revisions`. Never `Complete`: see `DiffMayBeServerLimited`.
+    /// Binary changes have no text patch in a diff.
     CompareDiff {
         revisions: PullRevisions,
         text: String,
@@ -393,7 +398,7 @@ impl<T: Transport> EvidenceClient<T> {
                 Ok(Evidence::CompareDiff {
                     revisions: revisions.clone(),
                     text,
-                    completeness,
+                    completeness: server_limited(completeness),
                 })
             }
             EvidenceRequest::History { from, path } => {
@@ -651,6 +656,15 @@ impl<T: Transport> EvidenceClient<T> {
 fn unpinned(coverage: Completeness) -> Completeness {
     match coverage {
         Completeness::Complete => Completeness::Partial(PartialReason::MutableSourceUnpinned),
+        partial @ Completeness::Partial(_) => partial,
+    }
+}
+
+/// A diff that arrived whole may still be missing what GitHub chose not to render, so full
+/// local coverage becomes `DiffMayBeServerLimited`. A local byte cap already reported is kept.
+fn server_limited(coverage: Completeness) -> Completeness {
+    match coverage {
+        Completeness::Complete => Completeness::Partial(PartialReason::DiffMayBeServerLimited),
         partial @ Completeness::Partial(_) => partial,
     }
 }
