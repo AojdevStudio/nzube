@@ -45,7 +45,7 @@ The files and diff endpoints are mutable: they describe the pull request as it i
 - **File list ceiling.** GitHub lists at most 3000 files for a pull request. A file list shorter than the pull request's `changed_files` is reported as `Partial(FilesBelowChangedCount)`.
 - **Mutable content.** Issues, comments, and pull request metadata can change between reads. A multi-page list is not an atomic snapshot. Each receipt records when its response arrived and the SHA-256 of its body.
 - **Errors.** `FetchError` separates `InvalidCredentials` (401), `PermissionDenied` (403, with SSO-required and not-granted-to-token reasons), `RateLimited` (primary or secondary, on 403 or 429, following GitHub's documented headers), `Unavailable` (404: missing *or* not visible, never proof of nonexistence), `Moved`, `Gone`, `Transport`, `Malformed`, `ResponseTooLarge`, `ByteBudgetExhausted`, `InvalidLimits`, and `PaginationUnrecognized`. Error text never contains a token, a URL from a response, or a response body.
-- **Secrets.** `SecretToken` has a redacted `Debug` and no `Display`. Only this crate can read the value.
+- **Secrets.** `SecretToken` has a redacted `Debug` and no `Display`, so formatting an error, request, receipt, or evidence record never prints it. The raw value is readable through `SecretToken::expose_secret`, which exists for platform secure-storage adapters. Code that calls it must keep the value out of logs, telemetry, exports, and prompts. Inside this crate, only the HTTP transport reads it, to set the Authorization header or an OAuth form field.
 - **Provenance.** Every `Fetched` names the repository it read. Every call yields a `Receipt` with method, host, path and query, status, GitHub request id, rate-limit headers, body size, body SHA-256, and the time the response arrived. A receipt never includes a credential or a body.
 - **Auth is separate.** `auth::DeviceFlow` posts only to `github.com/login/device/code` and `github.com/login/oauth/access_token`. `EvidenceClient` never sends POST and never contacts github.com. `Credential` must be chosen explicitly. The crate never reads ambient credentials such as a `gh` login or environment tokens.
 
@@ -56,7 +56,7 @@ The files and diff endpoints are mutable: they describe the pull request as it i
 - **Connect.** A new grant becomes usable only after it has been saved.
 - **Expiry.** An access token within 60 seconds of expiry is refreshed without a client secret. The rotated grant is saved before the new token is returned. If that save fails, the new token is not returned, and the user must sign in again, because GitHub has already invalidated the old refresh token.
 - **Rejected or expired refresh.** A missing, expired, or rejected refresh token deletes the stored grant and returns `ReauthRequired`.
-- **Transient failures.** A transport failure or a 5xx response keeps the stored grant and returns `Refresh(error)`.
+- **Retryable failures.** Only an explicit refusal deletes the stored grant: an OAuth error response, or a 400 or 401 from the token endpoint. Throttling (429), other statuses, transport failures, and malformed responses keep the grant and return `Refresh(error)` for a retry.
 - **Disconnect.** `disconnect` deletes the local tokens and reports `remote_grant_revoked: false` with `REVOKE_URL`, because a secretless client cannot revoke the grant on GitHub.
 - **Storage adapters.** `SecretToken::expose_secret` exists only so storage adapters can write the value. Never log or display it.
 

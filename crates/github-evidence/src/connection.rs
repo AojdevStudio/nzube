@@ -75,7 +75,8 @@ pub enum ConnectionError {
     ReauthRequired(ReauthReason),
     #[error("secure storage: {0}")]
     Store(StoreError),
-    /// A transient refresh failure. The stored grant is kept for a later retry.
+    /// A refresh failure that is not a rejection, such as 429, 5xx, or a transport error.
+    /// The stored grant is kept for a later retry.
     #[error("token refresh failed: {0}")]
     Refresh(AuthError),
 }
@@ -123,10 +124,10 @@ impl<S: SecretStore, T: Transport> Connection<S, T> {
         }
         let rotated = match self.flow.refresh(refresh_token).await {
             Ok(grant) => StoredGrant::from_grant(&grant, now),
-            Err(transient @ (AuthError::Transport | AuthError::Status(500..=599))) => {
-                return Err(ConnectionError::Refresh(transient));
+            Err(error) if is_rejection(&error) => {
+                return self.forget(ReauthReason::RefreshRejected);
             }
-            Err(_) => return self.forget(ReauthReason::RefreshRejected),
+            Err(retryable) => return Err(ConnectionError::Refresh(retryable)),
         };
         // GitHub has already invalidated the old refresh token, so a failed save means
         // the user must sign in again; the rotated token is not handed out unsaved.
@@ -147,5 +148,25 @@ impl<S: SecretStore, T: Transport> Connection<S, T> {
     fn forget(&self, reason: ReauthReason) -> Result<Credential, ConnectionError> {
         self.store.delete().map_err(ConnectionError::Store)?;
         Err(ConnectionError::ReauthRequired(reason))
+    }
+}
+
+/// Only an explicit refusal deletes the stored grant: an OAuth error body, or 400 or 401
+/// from the token endpoint. Throttling (429), other statuses, transport failures, and
+/// malformed responses keep it for a retry, because deleting a still-valid refresh token
+/// would disconnect the user for a failure GitHub did not attribute to the grant.
+fn is_rejection(error: &AuthError) -> bool {
+    match error {
+        AuthError::IncorrectClientCredentials
+        | AuthError::DeviceFlowDisabled
+        | AuthError::AccessDenied
+        | AuthError::Expired
+        | AuthError::NotAppUserToken
+        | AuthError::UnknownOAuthError
+        | AuthError::Status(400 | 401) => true,
+        AuthError::InvalidClientId
+        | AuthError::Status(_)
+        | AuthError::Transport
+        | AuthError::Malformed => false,
     }
 }

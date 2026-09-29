@@ -3,17 +3,15 @@ use std::fmt;
 /// A credential value (access token, refresh token, device code).
 ///
 /// Debug is redacted and there is no Display, so formatting an error, request,
-/// or evidence record can never print it. Only this crate can read the value.
+/// or evidence record never prints it. The raw value is readable through
+/// `expose_secret`, which exists for platform secure-storage adapters; callers of
+/// that method must keep the value out of logs, telemetry, exports, and prompts.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretToken(String);
 
 impl SecretToken {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
-    }
-
-    pub(crate) fn expose(&self) -> &str {
-        &self.0
     }
 
     /// The raw value, for `connection::SecretStore` adapters that write platform secure

@@ -113,7 +113,7 @@ impl Transport for ReqwestTransport {
             builder = builder.header(*name, value);
         }
         if let Some(token) = &request.bearer {
-            builder = builder.bearer_auth(token.expose());
+            builder = builder.bearer_auth(token.expose_secret());
         }
         if !request.form.is_empty() {
             let pairs: Vec<(&str, &str)> = request
@@ -121,7 +121,7 @@ impl Transport for ReqwestTransport {
                 .iter()
                 .map(|(k, v)| match v {
                     FormValue::Plain(s) => (*k, s.as_str()),
-                    FormValue::Secret(s) => (*k, s.expose()),
+                    FormValue::Secret(s) => (*k, s.expose_secret()),
                 })
                 .collect();
             builder = builder.form(&pairs);

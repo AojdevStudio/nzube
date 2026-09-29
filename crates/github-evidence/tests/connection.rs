@@ -331,3 +331,24 @@ fn stored_grant_debug_is_redacted() {
     );
     assert_eq!(stored.access_expires_at, Some(NOW + 1));
 }
+
+/// Throttling or an unclear refresh failure is not a rejection: the grant stays for a retry.
+#[tokio::test]
+async fn throttled_or_ambiguous_refresh_keeps_the_stored_grant() {
+    for status in [429, 408, 403] {
+        let store = MemoryKeychain::default();
+        let fixture = Fixture::with([(status, "{}")]);
+        let conn = connection(&store, &fixture);
+        conn.connect(&grant(Some(10), Some((REFRESH, 15_897_600))), NOW)
+            .unwrap();
+        assert_eq!(
+            conn.credential(NOW + 1_000).await.unwrap_err(),
+            ConnectionError::Refresh(AuthError::Status(status)),
+            "{status}"
+        );
+        assert!(
+            store.raw().is_some_and(|raw| raw.contains(REFRESH)),
+            "{status} deleted a grant GitHub did not reject"
+        );
+    }
+}
