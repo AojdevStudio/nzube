@@ -1,17 +1,23 @@
 # Compatibility and feasibility receipt
 
-Run date: 2026-09-29, on one Linux desktop, with real user consent. This file records what the run showed; it makes no claim about platforms that were not tested. It contains no credentials, client ids, request ids, account details, host names, or addresses.
+Run date: 2026-09-29, on one Linux desktop, with one real user consent. It covers two sets of runs:
+
+- The first five generations ran on the pre-promotion proof code.
+- One later generation ran on this package's CLI at commit `d962cb24237be5fa6be28cee223c43a6f4c5deb2`. See [Promoted CLI run](#promoted-cli-run).
+
+This file records what the runs showed and makes no claim about platforms that were not tested. It contains no credentials, client ids, request ids, account details, host names, or addresses.
 
 ## Compatibility
 
 | Question | Result | Evidence |
 | --- | --- | --- |
-| Can a user's existing ChatGPT plan power Nzube generation without a separately billed API key? | Yes on Linux desktop, through direct Sign in with ChatGPT | Real consent, `chatgpt.tokens.use.direct` granted, five completed generations below |
+| Can a user's existing ChatGPT plan power Nzube generation without a separately billed API key? | Yes on Linux desktop, through direct Sign in with ChatGPT | Real consent, `chatgpt.tokens.use.direct` granted, five completed generations below plus one through this package's CLI |
 | Billing route | Inferred as ChatGPT plan: plan-scoped OAuth bearer on `POST /v1/responses`, no API key present, no fallback path | No usage-meter reading was taken |
 | Needs a Nzube cloud account or hosted backend | No | Public PKCE client, loopback callback, local store |
 | Needs Codex CLI or another companion | No, for this route | The CLI talks to OpenAI directly |
 | Browser on another machine | Works through `ssh -N -L 1455:127.0.0.1:1455` plus a short `/start` redirect | The callback stayed on 127.0.0.1 |
 | Credential storage | OS keyring (Linux Secret Service), one record per issued client | No token on disk or in logs |
+| Token refresh | Worked once, live, through the package's serialized refresh | Promoted CLI run below. Sign-out revocation is not implemented. |
 | macOS, Windows desktop | Unverified | No keyring implementation or run |
 | iOS, Android | Unverified | OpenAI documents only an HTTP loopback redirect; a mobile redirect is undocumented |
 | Codex app-server route (separate) | Unproven | Its login was not approved during this run |
@@ -36,6 +42,20 @@ Model: `gpt-5.6-luna`, chosen from the account's `/v1/models` list and reported 
 - **Export:** the first brief was exported as 2,515 bytes. The export is byte-equal to the stored output, and its sha256 equals the hash of the streamed text. After the cancellation and stream-cut runs, the stored output was unchanged and a second export was identical.
 - **Draft safety:** every attempt kept the original request text unchanged (hash-checked).
 
+## Promoted CLI run
+
+This run tested the package code itself, after the lifecycle, SSE, concurrency, and lock changes. It used `tools/subscription-proof` at commit `d962cb24237be5fa6be28cee223c43a6f4c5deb2`, which an independent review had passed on Linux with glibc. It ran on 2026-09-29 at 23:45–23:46Z. No new consent was given: it reused the consent and client registration from the first runs, and the credential stayed in the OS keyring. It used no API key and no other route.
+
+| Step | Result |
+| --- | --- |
+| `check` | The stored access token had expired, so the CLI refreshed it live under the per-session refresh lock. The refreshed credential kept the plan scope. `GET /v1/models` returned 200 and listed `gpt-5.6-luna`. |
+| `infer` | Read-only investigation request (`fixtures/request-readonly.md`) with guidance v2 (`fixtures/guidance.md`, `b0d974e8…`). `POST /v1/responses` with `store:false`, `stream:true`, no tools. `gpt-5.6-luna` was selected and served, the stream ended in `response.completed` with `reasoning` and `message` items only, and usage was 535 input and 998 output tokens. |
+| `export` | 3,236 bytes, sha256 `1521adb6d73f67af9a489c625927ebb45d501663af49b6d86af6eeef884f3425`. The export is byte-equal to the stored output (full-byte comparison), and its hash equals the hash of the streamed text. |
+
+- **The brief:** it keeps "Findings only" and the read-only constraint, limits proof to existing tests or non-mutating reproduction, says not to create or modify tests or source, and ends with a stop point.
+- **Billing:** as for the first runs, it is inferred from the route and the plan scope. No usage-meter reading was taken.
+- **Scope:** this is a single request on one model. It shows that the promoted code completes and persists a real generation; it is not a quality evaluation.
+
 ## Reviewed quality
 
 This is a reading of the outputs, not a score.
@@ -57,7 +77,7 @@ This is a reading of the outputs, not a score.
 
 ## Not shown
 
-- live token refresh and sign-out revocation
+- sign-out revocation, and token refresh beyond the single live refresh above
 - a ChatGPT usage-meter reading
 - macOS, Windows, iOS, and Android
 - adversarial or broader prompt-quality evaluation
