@@ -22,4 +22,10 @@ PStack is the owner's preferred workflow, with configurable guidance for users w
 
 Final product screenshots, a capture-to-export walkthrough, capability matrix with verification date, provider setup explanation, platform download status, open-source license/dependency notes, and known limitations. These must come from the installed implementation. Static design concepts must remain labeled concepts and cannot substitute for capability evidence.
 
-Goodnotes was supplied as design inspiration. Its library, document canvas, compact toolbar and supporting sheets informed exploration. Nzube branding, screenshots and user-facing content must be original.
+Bond is the current visual reference, replacing the earlier Goodnotes direction. Three existing concepts were revised with quieter monochrome controls, compact navigation, and more writing space. They remain design choices awaiting selection. Nzube branding, screenshots, and user-facing content must be original.
+
+## Current capability notes
+
+One Linux CLI proof completed direct Sign in with ChatGPT, selected original guidance, generated and saved complete briefs, and exported exact output bytes. Its subscription billing attribution follows the documented plan-scoped route; no usage meter was inspected. This supports a specific feasibility claim, not a claim that the five-platform product has shipped.
+
+Dedicated GitHub onboarding, a combined repository-grounded product flow, actual mobile provider authentication, and installed product screenshots remain unavailable. Use the [compatibility record](../architecture/compatibility.md) and [release ledger](readiness.md) when preparing copy. Do not turn a simulated design screenshot into evidence of live generation.
