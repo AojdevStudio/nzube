@@ -18,7 +18,7 @@ The [public proof receipt](https://github.com/AojdevStudio/nzube/blob/1dc78c5eee
 
 The requests were synthetic. They contained no retrieved repository evidence. One guidance rule incorrectly asked a read-only investigation for a failing test. A revised source version restricted that rule to authorized implementation, and a real regenerated brief explicitly forbade creating or modifying tests. The refinement case returned the complete brief and changed exactly the requested line. These examples support the route and expose a prompt-quality defect; they do not establish broad output quality.
 
-A further run through the public CLI at `d962cb2` exercised live token refresh, model retrieval, and a completed response. Its saved brief and export contained the same 3,236 bytes with SHA-256 `1521adb6d73f67af9a489c625927ebb45d501663af49b6d86af6eeef884f3425`. The read-only endpoint held, but the output classified some user-supplied facts as verified. Evidence classification still needs evaluation.
+The [follow-up receipt](https://github.com/AojdevStudio/nzube/blob/f542322f91fb532db9159a86e12d0a613ad09540/tools/subscription-proof/RECEIPT.md#promoted-cli-run) records a further run through the public CLI at `d962cb2`. It exercised live token refresh, model retrieval, and a completed response. Its saved brief and export contained the same 3,236 bytes with SHA-256 `1521adb6d73f67af9a489c625927ebb45d501663af49b6d86af6eeef884f3425`. The read-only endpoint held, but the output classified some user-supplied facts as verified. Evidence classification still needs evaluation.
 
 Remote sign-out, installed macOS and Windows operation, and actual mobile provider authentication remain unverified.
 
