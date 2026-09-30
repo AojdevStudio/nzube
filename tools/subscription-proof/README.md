@@ -59,7 +59,7 @@ bun src/cli.ts infer req-1 --invalid-auth                 # real 401: failure, n
 - **Concurrency:** overlapping runs coordinate through lock files.
   - Store updates and attempt ids go through `<data>/store/.lock`.
   - Evidence appends go through `<data>/evidence.json.lock`.
-  - Token refresh is serialized per session (`<data>/state/refresh.lock`), and the stored credential is re-read under the lock, as OpenAI requires for rotating refresh tokens.
+  - Every write of the session credential goes through one per-session lock (`<data>/state/refresh.lock`): refresh and the sign-in that stores a new grant. Refresh re-reads the stored credential under the lock, as OpenAI requires for rotating refresh tokens, so an in-flight refresh can never overwrite a newer sign-in.
   - The locks are kernel advisory locks (`flock(2)` through Bun's FFI, Linux with glibc). The kernel releases a lock when its owner exits or crashes, and lock files are never deleted, so no process can take over or remove a lock that a live process holds.
   - If `flock` cannot be loaded, commands fail with a storage error instead of running unlocked.
   - Tests check 8 overlapping failed runs and 40 overlapping successful runs, including one evidence entry per generated attempt.
@@ -69,7 +69,7 @@ bun src/cli.ts infer req-1 --invalid-auth                 # real 401: failure, n
 ## Tests
 
 ```sh
-bun run check    # bun test (43 checks) and tsc --noEmit
+bun run check    # bun test (44 checks) and tsc --noEmit
 ```
 
 The tests use no real network, credentials, or OS keyring.
@@ -89,7 +89,7 @@ The tests use no real network, credentials, or OS keyring.
 - allowlisted error diagnostics, with fixture text containing personal-looking strings that must not survive serialization
 - per-attempt history
 - CLI exit codes
-- single-flight token refresh
+- single-flight token refresh, and a sign-in that lands during a refresh keeping its newer grant
 - SSE framing at every chunk size
 - lock ownership across processes: a live owner whose lock file names a dead process keeps the lock, and a killed owner releases it with no takeover step
 

@@ -76,3 +76,17 @@ export async function refreshSerialized(opts: {
     return next;
   });
 }
+
+/**
+ * Stores a freshly signed-in credential under the same per-session lock as refresh, so an
+ * in-flight refresh finishes (and saves) first and can never overwrite the newer grant; any
+ * later refresh re-reads this credential under the lock.
+ */
+export async function storeSignedInCredential(opts: {
+  clientId: string;
+  lockPath: string;
+  store: { save(id: string, c: Credential): Promise<void> };
+  cred: Credential;
+}): Promise<void> {
+  await withFileLock(opts.lockPath, () => opts.store.save(opts.clientId, opts.cred));
+}

@@ -8,7 +8,7 @@ setDefaultTimeout(30_000);
 import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyRefresh, type Credential, PLAN_SCOPE, refreshSerialized } from "../src/credentials";
+import { applyRefresh, type Credential, PLAN_SCOPE, refreshSerialized, storeSignedInCredential } from "../src/credentials";
 import { memoryStore } from "../src/keyring";
 import { createSseParser } from "../src/sse";
 import { type Framing, freePort, startMockOpenAI } from "./mock-openai";
@@ -208,6 +208,44 @@ describe("concurrent runs", () => {
     expect(a.access_token).toBe("new-from-r0");
     expect(b.access_token).toBe("new-from-r0");
     expect(applyRefresh).toBeDefined();
+  });
+});
+
+describe("refresh and sign-in writers", () => {
+  test("a sign-in that lands during a refresh is not overwritten by the refresh", async () => {
+    const store = memoryStore();
+    const lockPath = join(mkdtempSync(join(tmpdir(), "nzube-lock-")), "refresh.lock");
+    const base: Credential = {
+      client_id: "oaiapp_test",
+      subject: "s",
+      ext_agent_host_id: "urn:uuid:placeholder",
+      id_token: "placeholder-id",
+      access_token: "old",
+      refresh_token: "r0",
+      token_type: "Bearer",
+      scopes: ["openid", PLAN_SCOPE],
+      expires_at: 0,
+      saved_at: "t0",
+    };
+    await store.save("oaiapp_test", base);
+    let exchangeStarted!: () => void;
+    const started = new Promise<void>((r) => (exchangeStarted = r));
+    const refreshing = refreshSerialized({
+      clientId: "oaiapp_test",
+      lockPath,
+      store,
+      nowSeconds: () => 1_000,
+      refresh: async () => {
+        exchangeStarted();
+        await Bun.sleep(150); // the old lineage is being exchanged
+        return { access_token: "refreshed-old-lineage", refresh_token: "r1", expires_in: 3600, scope: `openid ${PLAN_SCOPE}` };
+      },
+    });
+    await started;
+    // A reauthorization completes while the exchange is in flight.
+    const signedIn: Credential = { ...base, access_token: "new-grant", refresh_token: "n0", expires_at: 999_999, saved_at: "t1" };
+    await Promise.all([refreshing, storeSignedInCredential({ clientId: "oaiapp_test", lockPath, store, cred: signedIn })]);
+    expect((await store.load("oaiapp_test"))?.access_token).toBe("new-grant");
   });
 });
 

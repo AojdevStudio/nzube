@@ -35,7 +35,7 @@ import { API_BASE, CALLBACK_PORT, ISSUER, RESOURCE } from "./endpoints";
 
 const keyring = selectedStore();
 import { httpFailure, modelsFromResponse } from "./http";
-import { checkIdentityBinding, type Credential, PLAN_SCOPE, refreshSerialized, subjectBinding } from "./credentials";
+import { checkIdentityBinding, type Credential, PLAN_SCOPE, refreshSerialized, storeSignedInCredential, subjectBinding } from "./credentials";
 import { createSseParser } from "./sse";
 import { withFileLockSync } from "./lock";
 
@@ -49,6 +49,8 @@ const dataDir = dataRoot;
 const stateDir = join(dataDir, "state");
 const hostFile = join(stateDir, "host.json");
 const registrationFile = join(stateDir, "registration.json");
+/** Serializes every write of the session credential: refresh and sign-in. */
+const refreshLockPath = join(stateDir, "refresh.lock");
 const evidenceFile = join(dataDir, "evidence.json");
 const actionFile = join(dataDir, "signin-action.md");
 
@@ -242,17 +244,23 @@ async function signin() {
     checkIdentityBinding(reg?.subjectSha256 ?? null, subject);
     evidence.identityBinding = reg ? "matched existing registration" : "new registration";
 
-    await keyring.save(issued, {
-      client_id: issued,
-      subject,
-      ext_agent_host_id: host,
-      id_token: tok.id_token as string,
-      access_token: tok.access_token as string,
-      refresh_token: (tok.refresh_token as string | undefined) ?? null,
-      token_type: String(tok.token_type ?? "Bearer"),
-      scopes: granted,
-      expires_at: Math.floor(Date.now() / 1000) + Number(tok.expires_in ?? 0),
-      saved_at: now(),
+    // Same lock as refresh: an in-flight refresh finishes first, and never overwrites this grant.
+    await storeSignedInCredential({
+      clientId: issued,
+      lockPath: refreshLockPath,
+      store: keyring,
+      cred: {
+        client_id: issued,
+        subject,
+        ext_agent_host_id: host,
+        id_token: tok.id_token as string,
+        access_token: tok.access_token as string,
+        refresh_token: (tok.refresh_token as string | undefined) ?? null,
+        token_type: String(tok.token_type ?? "Bearer"),
+        scopes: granted,
+        expires_at: Math.floor(Date.now() / 1000) + Number(tok.expires_in ?? 0),
+        saved_at: now(),
+      },
     });
     writeAtomic(registrationFile, `${JSON.stringify({ client_id: issued, subjectSha256: subjectBinding(subject), agent_name_hint: AGENT_NAME, redirect_uri: REDIRECT_URI, scopes: granted, planUsageGranted: granted.includes(PLAN_SCOPE), savedAt: now(), storage: "secret-service" }, null, 2)}\n`);
     evidence.storage = { keyring: "secret-service", tokensOnDisk: false };
@@ -279,7 +287,7 @@ async function credential(): Promise<Credential> {
   const { client_id } = JSON.parse(readFileSync(registrationFile, "utf8")) as { client_id: string };
   const cred = await refreshSerialized({
     clientId: client_id,
-    lockPath: join(stateDir, "refresh.lock"),
+    lockPath: refreshLockPath,
     store: keyring,
     nowSeconds: () => Math.floor(Date.now() / 1000),
     refresh: async (stale) => {
