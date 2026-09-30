@@ -1,0 +1,2 @@
+# CI-equivalent checks for the review gate (one command per line).
+cd tools/subscription-proof && bun install --frozen-lockfile && bun run check

@@ -1,0 +1,17 @@
+{
+  "name": "nzube-subscription-proof",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Feasibility CLI: direct Sign in with ChatGPT plan usage for Nzube brief generation",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "bun test && tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
